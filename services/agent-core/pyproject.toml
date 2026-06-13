@@ -1,0 +1,22 @@
+[project]
+name = "describeops-agent-core"
+version = "0.1.0"
+description = "Qwen-Agent society orchestration for DescribeOps accessibility artifacts."
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.9.0"
+]
+
+[project.optional-dependencies]
+qwen = [
+  "qwen-agent>=0.0.27"
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

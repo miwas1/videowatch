@@ -1,0 +1,39 @@
+{
+  "name": "describeops",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "vite build apps/extension && vite build apps/desktop-companion",
+    "typecheck": "tsc -p apps/extension/tsconfig.json --noEmit && tsc -p apps/desktop-companion/tsconfig.json --noEmit && tsc -p packages/shared/tsconfig.json --noEmit",
+    "test": "vitest run --pool=threads",
+    "test:api": "node scripts/run-python-tests.mjs api",
+    "test:agent": "node scripts/run-python-tests.mjs agent",
+    "test:python": "npm run test:api && npm run test:agent",
+    "test:rust": "cargo test --manifest-path apps/desktop-companion/src-tauri/Cargo.toml",
+    "test:e2e": "playwright test apps/extension/tests/e2e",
+    "verify": "npm run typecheck && npm test && npm run test:rust && npm run test:python"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@types/chrome": "^0.1.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "jsdom": "^27.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0",
+    "vitest": "^4.0.0"
+  },
+  "dependencies": {
+    "@axe-core/playwright": "^4.11.0",
+    "@radix-ui/react-tabs": "^1.1.0",
+    "@tauri-apps/api": "^2.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "axe-core": "^4.11.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^4.0.0"
+  }
+}

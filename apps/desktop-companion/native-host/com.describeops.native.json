@@ -1,0 +1,7 @@
+{
+  "name": "com.describeops.native",
+  "description": "DescribeOps native companion",
+  "path": "/absolute/path/to/describeops-native-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://replace-with-extension-id/"]
+}
