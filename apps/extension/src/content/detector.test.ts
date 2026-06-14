@@ -26,6 +26,45 @@ describe("scanDocument", () => {
     expect(snapshot.captions).toContain("English");
   });
 
+  it("detects a normal video src element", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>Demo</h1>
+        <video src="https://cdn.example.test/demo.mp4" controls></video>
+      </main>
+    `;
+
+    const snapshot = scanDocument(document);
+
+    expect(snapshot.media).toHaveLength(1);
+    expect(snapshot.media[0]).toMatchObject({
+      kind: "video",
+      currentTime: 0,
+      source: "https://cdn.example.test/demo.mp4"
+    });
+    expect(snapshot.media[0].source).toContain("demo.mp4");
+  });
+
+  it("chooses the largest visible playable video before ads, thumbnails, and hidden videos", () => {
+    document.body.innerHTML = `
+      <main>
+        <video aria-label="Autoplay ad" width="120" height="70" autoplay muted src="/ad.mp4"></video>
+        <video aria-label="Main lesson" width="1280" height="720" controls src="/main.mp4"></video>
+        <video aria-label="Hidden tracker" width="1920" height="1080" hidden src="/tracker.mp4"></video>
+      </main>
+    `;
+
+    const snapshot = scanDocument(document);
+
+    expect(snapshot.media).toHaveLength(1);
+    expect(snapshot.media[0]).toMatchObject({
+      label: "Main lesson",
+      width: 1280,
+      height: 720,
+      source: "/main.mp4"
+    });
+  });
+
   it("returns readable page evidence when no media exists", () => {
     document.body.innerHTML = `
       <header>DescribeOps</header>

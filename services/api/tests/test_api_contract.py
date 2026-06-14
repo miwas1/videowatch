@@ -35,6 +35,7 @@ def test_job_routes_require_authentication(monkeypatch):
 
 def test_create_analyze_and_fetch_job(monkeypatch):
     monkeypatch.setenv("DESCRIBEOPS_API_TOKEN", "test-api-token")
+    monkeypatch.setenv("QWEN_API_KEY", "sk-test")
     client = TestClient(create_app())
 
     created = client.post(
@@ -67,11 +68,25 @@ def test_create_analyze_and_fetch_job(monkeypatch):
     assert fetched.status_code == 200
     assert fetched.json()["traceId"].startswith("trc_")
     assert fetched.json()["mode"] == "low_bandwidth"
+    assert fetched.json()["progress"]["stage"] == "complete"
 
     artifacts = client.get(f"/v1/jobs/{job_id}/artifacts", headers=authed_headers())
     assert artifacts.status_code == 200
     kinds = {artifact["kind"] for artifact in artifacts.json()["artifacts"]}
-    assert {"review-cues", "playback-package", "webvtt", "qa_report"}.issubset(kinds)
+    assert {"media-analysis-summary", "chunk-timeline", "review-cues", "playback-package", "webvtt", "qa_report"}.issubset(kinds)
+
+
+def test_analyze_job_fails_fast_without_qwen_key(monkeypatch):
+    monkeypatch.setenv("DESCRIBEOPS_API_TOKEN", "test-api-token")
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    client = TestClient(create_app())
+
+    created = client.post("/v1/jobs", headers=authed_headers(), json={"source": "browser"})
+    response = client.post(f"/v1/jobs/{created.json()['id']}/analyze", headers=authed_headers())
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "CONFIG_ERROR"
 
 
 def test_upload_rejects_oversized_assets(monkeypatch):

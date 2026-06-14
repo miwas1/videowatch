@@ -16,3 +16,5 @@ __pycache__/
 apps/extension/dist/
 apps/desktop-companion/dist/
 apps/desktop-companion/src-tauri/target/
+
+.youtube_qwen_cache

@@ -9,6 +9,36 @@ export const EventNames = [
   "PLAYBACK_SYNC_CHANGED"
 ] as const;
 
+export const VideoPlatforms = [
+  "youtube",
+  "tiktok",
+  "instagram",
+  "twitter",
+  "facebook",
+  "vimeo",
+  "twitch",
+  "generic"
+] as const;
+
+export const MediaSourceKinds = [
+  "direct_url",
+  "uploaded_asset",
+  "tab_capture",
+  "embedded_player",
+  "page_snapshot"
+] as const;
+
+export const AnalysisStages = [
+  "queued",
+  "resolving_media",
+  "preparing_media",
+  "sampling_frames",
+  "analyzing_chunk",
+  "building_playback",
+  "complete",
+  "failed"
+] as const;
+
 export const DetectedMediaSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["video", "audio", "embedded-player"]),
@@ -18,7 +48,11 @@ export const DetectedMediaSchema = z.object({
   width: z.number().int().nonnegative().optional(),
   height: z.number().int().nonnegative().optional(),
   hasCaptions: z.boolean(),
-  source: z.string().optional()
+  source: z.string().optional(),
+  platform: z.enum(VideoPlatforms).default("generic"),
+  isSocial: z.boolean().default(false),
+  isFocused: z.boolean().default(false),
+  isPlaying: z.boolean().default(false)
 });
 
 export const InaccessibleRegionSchema = z.object({
@@ -37,7 +71,43 @@ export const PageAccessibilitySnapshotSchema = z.object({
   visibleText: z.array(z.string()),
   transcriptText: z.array(z.string()),
   captions: z.array(z.string()),
+  liveCaptionText: z.array(z.string()).default([]),
+  platform: z.enum(VideoPlatforms).default("generic"),
   inaccessibleRegions: z.array(InaccessibleRegionSchema)
+});
+
+export const MediaAnalysisFeaturesSchema = z.object({
+  ocr: z.boolean().default(true),
+  avoidDialogue: z.boolean().default(true),
+  audioDescription: z.boolean().default(true)
+});
+
+export const MediaAnalysisRequestSchema = z.object({
+  mediaId: z.string().optional(),
+  sourceKind: z.enum(MediaSourceKinds).default("page_snapshot"),
+  videoUrl: z.string().optional(),
+  pageUrl: z.string(),
+  title: z.string(),
+  duration: z.number().nonnegative(),
+  currentTime: z.number().nonnegative().default(0),
+  platform: z.enum(VideoPlatforms).default("generic"),
+  detailLevel: z.enum(["minimal", "balanced", "detailed"]).default("balanced"),
+  features: MediaAnalysisFeaturesSchema.default({
+    ocr: true,
+    avoidDialogue: true,
+    audioDescription: true
+  }),
+  frameSamples: z.array(z.string()).default([])
+});
+
+export const JobProgressSchema = z.object({
+  stage: z.enum(AnalysisStages),
+  message: z.string(),
+  percent: z.number().int().min(0).max(100),
+  currentChunk: z.number().int().nonnegative().default(0),
+  totalChunks: z.number().int().nonnegative().default(0),
+  partialCueCount: z.number().int().nonnegative().default(0),
+  updatedAt: z.string().datetime().optional()
 });
 
 export const VideoFrameSampleSchema = z.object({
@@ -139,6 +209,27 @@ export const PlaybackPackageSchema = z.object({
   })
 });
 
+export const ChunkTimelineItemSchema = z.object({
+  chunkId: z.string(),
+  start: z.number().nonnegative(),
+  end: z.number().nonnegative(),
+  analysis: z.string(),
+  transport: z.string(),
+  frameCount: z.number().int().nonnegative().default(0),
+  importance: z.enum(["low", "medium", "high"]).default("medium")
+});
+
+export const BackendJobRecordSchema = z.object({
+  id: z.string().min(1),
+  source: z.string(),
+  mode: z.enum(["standard", "low_bandwidth"]),
+  status: z.enum(["queued", "running", "needs_review", "complete", "failed"]),
+  traceId: z.string().min(1),
+  snapshot: PageAccessibilitySnapshotSchema.optional().nullable(),
+  analysisRequest: MediaAnalysisRequestSchema.optional().nullable(),
+  progress: JobProgressSchema.optional()
+});
+
 export const ExportArtifactSchema = z.object({
   id: z.string().min(1),
   jobId: z.string().min(1),
@@ -228,8 +319,11 @@ export const DescribeOpsEventSchema = z.discriminatedUnion("name", [
 
 export type EventName = (typeof EventNames)[number];
 export type DetectedMedia = z.infer<typeof DetectedMediaSchema>;
+export type MediaSourceKind = z.infer<typeof MediaAnalysisRequestSchema>["sourceKind"];
 export type InaccessibleRegion = z.infer<typeof InaccessibleRegionSchema>;
 export type PageAccessibilitySnapshot = z.infer<typeof PageAccessibilitySnapshotSchema>;
+export type MediaAnalysisRequest = z.infer<typeof MediaAnalysisRequestSchema>;
+export type JobProgress = z.infer<typeof JobProgressSchema>;
 export type VideoFrameSample = z.infer<typeof VideoFrameSampleSchema>;
 export type TranscriptSegment = z.infer<typeof TranscriptSegmentSchema>;
 export type SceneObservation = z.infer<typeof SceneObservationSchema>;
@@ -238,6 +332,8 @@ export type SpeechGap = z.infer<typeof SpeechGapSchema>;
 export type MemoryPreference = z.infer<typeof MemoryPreferenceSchema>;
 export type ReviewCue = z.infer<typeof ReviewCueSchema>;
 export type PlaybackPackage = z.infer<typeof PlaybackPackageSchema>;
+export type ChunkTimelineItem = z.infer<typeof ChunkTimelineItemSchema>;
+export type BackendJobRecord = z.infer<typeof BackendJobRecordSchema>;
 export type ExportArtifact = z.infer<typeof ExportArtifactSchema>;
 export type OfflineQueueItem = z.infer<typeof OfflineQueueItemSchema>;
 export type EvidenceBundle = z.infer<typeof EvidenceBundleSchema>;

@@ -15,6 +15,18 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+VideoPlatform = Literal[
+    "youtube",
+    "tiktok",
+    "instagram",
+    "twitter",
+    "facebook",
+    "vimeo",
+    "twitch",
+    "generic",
+]
+
+
 class DetectedMedia(ApiModel):
     id: str
     kind: Literal["video", "audio", "embedded-player"]
@@ -25,6 +37,10 @@ class DetectedMedia(ApiModel):
     height: int | None = None
     hasCaptions: bool = False
     source: str | None = None
+    platform: VideoPlatform = "generic"
+    isSocial: bool = False
+    isFocused: bool = False
+    isPlaying: bool = False
 
 
 class InaccessibleRegion(ApiModel):
@@ -43,9 +59,54 @@ class PageAccessibilitySnapshot(ApiModel):
     visibleText: list[str] = Field(default_factory=list)
     transcriptText: list[str] = Field(default_factory=list)
     captions: list[str] = Field(default_factory=list)
+    liveCaptionText: list[str] = Field(default_factory=list)
+    platform: VideoPlatform = "generic"
     inaccessibleRegions: list[InaccessibleRegion] = Field(default_factory=list)
     cookies: dict[str, str] = Field(default_factory=dict)
     localStorage: dict[str, str] = Field(default_factory=dict)
+
+
+MediaSourceKind = Literal["direct_url", "uploaded_asset", "tab_capture", "embedded_player", "page_snapshot"]
+AnalysisStage = Literal[
+    "queued",
+    "resolving_media",
+    "preparing_media",
+    "sampling_frames",
+    "analyzing_chunk",
+    "building_playback",
+    "complete",
+    "failed",
+]
+
+
+class MediaAnalysisFeatures(ApiModel):
+    ocr: bool = True
+    avoidDialogue: bool = True
+    audioDescription: bool = True
+
+
+class MediaAnalysisRequest(ApiModel):
+    mediaId: str | None = None
+    sourceKind: MediaSourceKind = "page_snapshot"
+    videoUrl: str | None = None
+    pageUrl: str = ""
+    title: str = ""
+    duration: float = 0
+    currentTime: float = 0
+    platform: VideoPlatform = "generic"
+    detailLevel: Literal["minimal", "balanced", "detailed"] = "balanced"
+    features: MediaAnalysisFeatures = Field(default_factory=MediaAnalysisFeatures)
+    frameSamples: list[str] = Field(default_factory=list)
+
+
+class JobProgress(ApiModel):
+    stage: AnalysisStage = "queued"
+    message: str = "Queued for analysis."
+    percent: int = Field(default=0, ge=0, le=100)
+    currentChunk: int = 0
+    totalChunks: int = 0
+    partialCueCount: int = 0
+    updatedAt: datetime | None = None
 
 
 class VideoFrameSample(ApiModel):
@@ -118,6 +179,7 @@ class JobCreateRequest(ApiModel):
     source: Literal["browser", "native-companion", "api"] = "api"
     mode: Literal["standard", "low_bandwidth"] = "standard"
     snapshot: PageAccessibilitySnapshot | None = None
+    analysisRequest: MediaAnalysisRequest | None = None
 
 
 class JobRecord(ApiModel):
@@ -129,6 +191,8 @@ class JobRecord(ApiModel):
     createdAt: datetime
     updatedAt: datetime
     snapshot: PageAccessibilitySnapshot | None = None
+    analysisRequest: MediaAnalysisRequest | None = None
+    progress: JobProgress = Field(default_factory=JobProgress)
     assets: list[dict[str, Any]] = Field(default_factory=list)
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     review: list[dict[str, Any]] = Field(default_factory=list)
@@ -144,6 +208,8 @@ class JobRecord(ApiModel):
             createdAt=now,
             updatedAt=now,
             snapshot=request.snapshot,
+            analysisRequest=request.analysisRequest,
+            progress=JobProgress(updatedAt=now),
         )
 
 
@@ -203,3 +269,100 @@ class MemoryPreferenceResponse(ApiModel):
 
 class MemoryPreferenceListResponse(ApiModel):
     memories: list[MemoryPreference]
+
+
+class QwenTranscriptItem(ApiModel):
+    start: float
+    end: float
+    text: str
+
+
+class QwenOcrItem(ApiModel):
+    time: float
+    text: str
+
+
+class QwenVisualChunkRequest(ApiModel):
+    video_id: str
+    chunk_id: str
+    start: float
+    end: float
+    frames: list[str]
+    transcript: list[QwenTranscriptItem] = Field(default_factory=list)
+    ocr: list[QwenOcrItem] = Field(default_factory=list)
+
+    @field_validator("end")
+    @classmethod
+    def chunk_end_after_start(cls, value: float, info: Any) -> float:
+        start = info.data.get("start")
+        if start is not None and value <= start:
+            raise ValueError("chunk end must be greater than start")
+        return value
+
+
+class QwenTimelineEvent(ApiModel):
+    start: float
+    end: float
+    type: Literal["visual_action", "ocr", "scene", "summary"]
+    description: str
+    importance: Literal["low", "medium", "high"]
+
+    @field_validator("description")
+    @classmethod
+    def event_description_required(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("timeline event description is required")
+        return value
+
+    @field_validator("end")
+    @classmethod
+    def event_end_after_start(cls, value: float, info: Any) -> float:
+        start = info.data.get("start")
+        if start is not None and value < start:
+            raise ValueError("timeline event end must be greater than or equal to start")
+        return value
+
+
+class QwenChunkAnalysisResponse(ApiModel):
+    events: list[QwenTimelineEvent]
+    chunk_summary: str
+
+
+class QwenTtsRequest(ApiModel):
+    text: str
+    voice: str = "default"
+    speed: float = Field(default=1.0, gt=0, le=4)
+
+
+class QwenTtsResult(ApiModel):
+    status: Literal["ready", "failed"]
+    durationMs: int = Field(ge=0)
+    format: Literal["audio/mpeg", "audio/wav", "audio/ogg", "audio/mp4"]
+    audioUrl: str | None = None
+    audioBytes: bytes | None = None
+
+
+class VideoChunk(ApiModel):
+    chunk_id: str
+    start: float
+    end: float
+    overlapPreviousSeconds: float = 0
+
+
+class ChunkSemanticMemory(ApiModel):
+    chunk_id: str
+    start: float
+    end: float
+    summary: str
+    entities: list[str] = Field(default_factory=list)
+    important_events: list[float] = Field(default_factory=list)
+    ocr_keywords: list[str] = Field(default_factory=list)
+
+
+class SectionSemanticMemory(ApiModel):
+    section_id: str
+    start: float
+    end: float
+    summary: str
+    key_events: list[float] = Field(default_factory=list)

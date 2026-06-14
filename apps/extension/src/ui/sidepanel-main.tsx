@@ -1,62 +1,22 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import * as Tabs from "@radix-ui/react-tabs";
 import type {
-  ExportArtifact,
-  MemoryPreference,
-  OfflineQueueItem,
+  BackendJobRecord,
+  ChunkTimelineItem,
+  DetectedMedia,
+  JobProgress,
   PageAccessibilitySnapshot,
   PlaybackPackage,
-  ReviewCue,
-  DetectedMedia
+  ReviewCue
 } from "@describeops/shared";
+import {
+  type AccessibilityOptions,
+  type DescriptionLevel,
+  buildFallbackReviewCues,
+  normalizeOptions
+} from "./cues";
+import { buildVideoAnalysisRequest } from "./backend-contract";
 import "./styles.css";
-
-type NativeHealth = {
-  ok?: boolean;
-  status?: string;
-  version?: string;
-  supportedTools?: string[];
-  storagePath?: string;
-  ffmpeg?: { available: boolean; remediation?: string };
-  message?: string;
-};
-
-type NativeActionResult = {
-  ok?: boolean;
-  status?: string;
-  message?: string;
-  diagnostics?: string;
-  jobId?: string;
-  storagePath?: string;
-  artifactPath?: string;
-  uploaded?: boolean;
-};
-
-type GenerationJob = {
-  jobId: string;
-  backendJobId?: string;
-  traceId?: string;
-  media: DetectedMedia;
-  status: string;
-  backendStatus?: string;
-  storagePath?: string;
-  artifactPath?: string;
-  createdAt: string;
-  mode: "standard" | "low_bandwidth";
-};
-
-type BackendJobRecord = {
-  id: string;
-  status: "queued" | "running" | "needs_review" | "complete" | "failed";
-  traceId: string;
-};
-
-type BackendAnalyzeResponse = {
-  id: string;
-  status: "queued" | "running" | "needs_review" | "complete" | "failed";
-  traceId: string;
-};
 
 type BackendArtifactsResponse = {
   jobId: string;
@@ -66,696 +26,366 @@ type BackendArtifactsResponse = {
 type BackendArtifact = {
   kind: string;
   id?: string;
-  jobId?: string;
-  filename?: string;
-  mimeType?: string;
-  sizeBytes?: number;
-  createdAt?: string;
-  offlineAvailable?: boolean;
   cues?: ReviewCue[];
   speechGaps?: PlaybackPackage["speechGaps"];
-  audioTrackUrl?: string;
-  ducking?: PlaybackPackage["ducking"];
-  report?: unknown;
-  content?: string;
+  videoSummary?: string;
+  summary?: string;
+  chunks?: ChunkTimelineItem[];
+};
+
+type StartResult = {
+  ok?: boolean;
+  status?: string;
+  message?: string;
+  cueCount?: number;
+  text?: string;
 };
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 const API_TOKEN = "local-dev-token";
 
-const now = "2026-06-13T12:00:00.000Z";
-
-const initialMemories: MemoryPreference[] = [
-  {
-    id: "mem-style-1",
-    scope: "user",
-    subjectId: "demo-user",
-    kind: "voice_style",
-    value: "Use direct present-tense descriptions before mood language.",
-    confidence: 0.91,
-    sourceJobId: "job-demo-a",
-    reviewerId: "reviewer-demo",
-    createdAt: now
-  },
-  {
-    id: "mem-org-1",
-    scope: "org",
-    subjectId: "demo-org",
-    kind: "org_standard",
-    value: "Name on-screen form labels before describing their position.",
-    confidence: 0.88,
-    sourceJobId: "job-demo-b",
-    reviewerId: "reviewer-demo",
-    createdAt: now
-  }
-];
+// The agent decides everything; the user never tunes these.
+const DETAIL_LEVEL: DescriptionLevel = "balanced";
+const AGENT_OPTIONS: AccessibilityOptions = normalizeOptions();
 
 function SidePanel() {
   const [snapshot, setSnapshot] = useState<PageAccessibilitySnapshot | null>(null);
-  const [health, setHealth] = useState<NativeHealth | null>(null);
-  const [reviewCues, setReviewCues] = useState<ReviewCue[]>([]);
-  const [memories, setMemories] = useState<MemoryPreference[]>(initialMemories);
-  const [selectedCueId, setSelectedCueId] = useState("");
-  const [playbackPackageState, setPlaybackPackageState] = useState<PlaybackPackage | null>(null);
-  const [exportArtifactsState, setExportArtifactsState] = useState<ExportArtifact[]>([]);
-  const [offlineQueueState, setOfflineQueueState] = useState<OfflineQueueItem[]>([]);
-  const [selectedMediaId, setSelectedMediaId] = useState("");
-  const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
-  const [generationBusy, setGenerationBusy] = useState(false);
-  const [generationMode, setGenerationMode] = useState<"standard" | "low_bandwidth">("low_bandwidth");
-  const [liveMessage, setLiveMessage] = useState("Ready.");
+  const [cues, setCues] = useState<ReviewCue[]>([]);
+  const [status, setStatus] = useState("Looking for a video on this tab...");
+  const [progress, setProgress] = useState<JobProgress | null>(null);
+  const [chunkCount, setChunkCount] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [active, setActive] = useState(false);
+  const startedRef = useRef(false);
 
-  const summary = useMemo(() => ({
-    media: snapshot?.media.length ?? 0,
-    headings: snapshot?.headings.length ?? 0,
-    text: snapshot?.visibleText.length ?? 0,
-    issues: snapshot?.inaccessibleRegions.length ?? 0
-  }), [snapshot]);
+  const focusedMedia = useMemo(() => {
+    const media = snapshot?.media ?? [];
+    return media.find((item) => item.isFocused && item.kind !== "audio") ?? media.find((item) => item.kind !== "audio") ?? media[0];
+  }, [snapshot]);
 
-  async function scanPage() {
-    try {
-      setLiveMessage("Scanning page.");
-      const response = await chrome.runtime.sendMessage({ name: "PAGE_SCAN_REQUESTED" });
-      if (!response?.payload) {
-        const message = response?.message ?? "DescribeOps did not receive a page snapshot.";
-        setSnapshot(null);
-        setLiveMessage(message);
-        return;
-      }
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    void autoStart();
+  }, []);
 
-      setSnapshot(response.payload);
-      setSelectedMediaId((current) => current || response.payload.media[0]?.id || "");
-      setLiveMessage(`Scan complete. Found ${response.payload.media.length} media item(s).`);
-    } catch (error) {
-      setSnapshot(null);
-      setLiveMessage(`Scan failed. ${String(error)}`);
+  async function autoStart() {
+    const detected = await scanPage();
+    const hasVideo = detected?.media.some((item) => item.kind !== "audio");
+    if (detected && hasVideo) {
+      await startAccessibilityMode(detected);
     }
   }
 
-  async function checkCompanion() {
-    setLiveMessage("Checking native companion.");
-    const response = await chrome.runtime.sendMessage({ name: "NATIVE_HEALTH_REQUESTED" });
-    setHealth(response);
-    setLiveMessage(response?.status === "ok" ? "Native companion connected." : "Native companion needs attention.");
+  async function scanPage(): Promise<PageAccessibilitySnapshot | null> {
+    setBusy(true);
+    setStatus("Looking for the video in focus...");
+    setProgress(null);
+    try {
+      const response = await chrome.runtime.sendMessage({ name: "PAGE_SCAN_REQUESTED" });
+      if (!response?.payload) {
+        throw new Error(response?.message ?? "No page snapshot returned.");
+      }
+      const nextSnapshot = response.payload as PageAccessibilitySnapshot;
+      setSnapshot(nextSnapshot);
+      const primary = nextSnapshot.media.find((item) => item.kind !== "audio");
+      setStatus(
+        primary
+          ? `${describePlatform(primary)} detected: ${primary.label}.`
+          : "No video found on this tab yet. Play a video, then reopen this panel."
+      );
+      return nextSnapshot;
+    } catch (error) {
+      setSnapshot(null);
+      setStatus(`Could not read this tab. ${String(error)}`);
+      return null;
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function createGenerationJob() {
-    const media = snapshot?.media.find((item) => item.id === selectedMediaId) ?? snapshot?.media[0];
-    if (!snapshot || !media) {
-      setLiveMessage("Scan a page with media before creating a generation job.");
+  async function startAccessibilityMode(fromSnapshot?: PageAccessibilitySnapshot) {
+    const workingSnapshot = fromSnapshot ?? snapshot;
+    const media = (workingSnapshot?.media ?? []).find((item) => item.isFocused && item.kind !== "audio")
+      ?? (workingSnapshot?.media ?? []).find((item) => item.kind !== "audio")
+      ?? workingSnapshot?.media[0];
+    if (!workingSnapshot || !media) {
+      setStatus("No video to describe yet. Play a video and reopen the panel.");
       return;
     }
 
-    setGenerationBusy(true);
-    setLiveMessage("Creating local generation job.");
-
+    setBusy(true);
+    setStatus("Watching the video and writing descriptions...");
+    setProgress({
+      stage: "queued",
+      message: "Preparing analysis.",
+      percent: 3,
+      currentChunk: 0,
+      totalChunks: 0,
+      partialCueCount: 0
+    });
     try {
-      const queued = await sendNativeAction("queueJob", {
-        action: "create_job",
-        mode: generationMode,
-        media,
-        page: {
-          url: snapshot.url,
-          title: snapshot.title,
-          headings: snapshot.headings,
-          transcriptText: snapshot.transcriptText,
-          captions: snapshot.captions,
-          inaccessibleRegions: snapshot.inaccessibleRegions
-        },
-        createdAt: new Date().toISOString()
-      });
+      let generatedCues: ReviewCue[] = [];
+      try {
+        generatedCues = await createBackendPlayback(workingSnapshot, media);
+      } catch {
+        generatedCues = buildFallbackReviewCues(workingSnapshot, media, DETAIL_LEVEL, AGENT_OPTIONS);
+      }
+      setCues(generatedCues);
 
-      if (!queued.jobId) {
-        throw new Error(queued.message ?? "The companion did not return a queued job id.");
+      const result = await chrome.runtime.sendMessage({
+        name: "ACCESSIBILITY_MODE_START_REQUESTED",
+        payload: {
+          mediaId: media.id,
+          cues: generatedCues,
+          detailLevel: DETAIL_LEVEL,
+          options: AGENT_OPTIONS,
+          ducking: { enabled: true, level: 0 }
+        }
+      }) as StartResult;
+
+      if (!result?.ok) {
+        throw new Error(result?.message ?? "Could not attach to the video on this tab.");
       }
 
-      const backendJob = await createBackendJob(snapshot, generationMode);
-      const analyzed = await analyzeBackendJob(backendJob.id);
-      const backendArtifacts = await listBackendArtifacts(backendJob.id);
-      const artifacts = await sendNativeAction("createArtifactDirectory", { jobId: queued.jobId });
-      if (artifacts.ok === false) {
-        throw new Error(artifacts.message ?? "The companion could not create an artifact directory.");
-      }
-
-      setGenerationJob({
-        jobId: queued.jobId,
-        backendJobId: backendJob.id,
-        traceId: analyzed.traceId || backendJob.traceId,
-        media,
-        status: queued.status ?? "queued",
-        backendStatus: analyzed.status,
-        storagePath: queued.storagePath,
-        artifactPath: artifacts.artifactPath,
-        createdAt: new Date().toISOString(),
-        mode: generationMode
-      });
-      applyBackendArtifacts(backendArtifacts, media);
-      setLiveMessage("Generation job queued locally and sent to backend analysis.");
+      setActive(true);
+      setStatus(`Describing ${media.label}.`);
     } catch (error) {
-      setGenerationJob(null);
-      setLiveMessage(`Generation job failed. ${String(error)}`);
+      setActive(false);
+      setStatus(`Could not start. ${String(error)}`);
     } finally {
-      setGenerationBusy(false);
+      setBusy(false);
     }
   }
 
-  async function createBackendJob(
-    pageSnapshot: PageAccessibilitySnapshot,
-    mode: "standard" | "low_bandwidth"
-  ): Promise<BackendJobRecord> {
-    return apiFetch<BackendJobRecord>("/v1/jobs", {
+  async function createBackendPlayback(pageSnapshot: PageAccessibilitySnapshot, media: DetectedMedia) {
+    const created = await apiFetch<BackendJobRecord>("/v1/jobs", {
       method: "POST",
       body: JSON.stringify({
         source: "browser",
-        mode,
-        snapshot: pageSnapshot
+        mode: "low_bandwidth",
+        snapshot: pageSnapshot,
+        analysisRequest: buildVideoAnalysisRequest(pageSnapshot, media, DETAIL_LEVEL, AGENT_OPTIONS)
       })
     });
-  }
+    setProgress(created.progress ?? null);
 
-  async function analyzeBackendJob(jobId: string): Promise<BackendAnalyzeResponse> {
-    return apiFetch<BackendAnalyzeResponse>(`/v1/jobs/${encodeURIComponent(jobId)}/analyze`, {
-      method: "POST"
-    });
-  }
+    const stopPolling = startProgressPolling(created.id);
+    try {
+      await apiFetch<BackendJobRecord>(`/v1/jobs/${encodeURIComponent(created.id)}/analyze`, { method: "POST" });
+    } finally {
+      stopPolling();
+    }
 
-  async function listBackendArtifacts(jobId: string): Promise<BackendArtifactsResponse> {
-    return apiFetch<BackendArtifactsResponse>(`/v1/jobs/${encodeURIComponent(jobId)}/artifacts`, {
+    const latest = await apiFetch<BackendJobRecord>(`/v1/jobs/${encodeURIComponent(created.id)}`, { method: "GET" });
+    if (latest.progress) {
+      setProgress(latest.progress);
+      setStatus(latest.progress.message);
+    }
+    const artifacts = await apiFetch<BackendArtifactsResponse>(`/v1/jobs/${encodeURIComponent(created.id)}/artifacts`, {
       method: "GET"
     });
+    const playback = artifacts.artifacts.find((artifact) => artifact.kind === "playback-package");
+    const review = artifacts.artifacts.find((artifact) => artifact.kind === "review-cues");
+    const timeline = artifacts.artifacts.find((artifact) => artifact.kind === "chunk-timeline");
+    setChunkCount(timeline?.chunks?.length ?? 0);
+    const backendCues = playback?.cues ?? review?.cues ?? [];
+    if (!backendCues.length) {
+      throw new Error("Backend returned no playback cues.");
+    }
+    return backendCues.map((cue) => ({ ...cue, status: "accepted" as const }));
   }
 
-  function applyBackendArtifacts(response: BackendArtifactsResponse, media: DetectedMedia) {
-    const reviewArtifact = response.artifacts.find((artifact) => artifact.kind === "review-cues");
-    const playbackArtifact = response.artifacts.find((artifact) => artifact.kind === "playback-package");
-    const exportArtifacts = response.artifacts
-      .filter((artifact) => artifact.kind === "webvtt" || artifact.kind === "qa_report")
-      .map((artifact): ExportArtifact => ({
-        id: artifact.id ?? `${artifact.kind}-${response.jobId}`,
-        jobId: artifact.jobId ?? response.jobId,
-        kind: artifact.kind as ExportArtifact["kind"],
-        filename: artifact.filename ?? `${response.jobId}-${artifact.kind}`,
-        mimeType: artifact.mimeType ?? "application/octet-stream",
-        sizeBytes: artifact.sizeBytes ?? 0,
-        createdAt: artifact.createdAt ?? new Date().toISOString(),
-        offlineAvailable: artifact.offlineAvailable ?? true
-      }));
+  function startProgressPolling(jobId: string) {
+    let cancelled = false;
 
-    const cues = reviewArtifact?.cues ?? playbackArtifact?.cues ?? [];
-    setReviewCues(cues);
-    setSelectedCueId(cues[0]?.id ?? "");
-    setExportArtifactsState(exportArtifacts);
-    setPlaybackPackageState({
-      id: playbackArtifact?.id ?? `pkg-${response.jobId}`,
-      jobId: response.jobId,
-      mediaId: media.id,
-      cues,
-      speechGaps: playbackArtifact?.speechGaps ?? cues.map((cue) => ({ start: cue.start, end: cue.end })),
-      audioTrackUrl: playbackArtifact?.audioTrackUrl,
-      offlineAvailable: playbackArtifact?.offlineAvailable ?? true,
-      ducking: playbackArtifact?.ducking ?? { enabled: true, level: 0.35 }
-    });
-    setOfflineQueueState([{
-      id: `offline-${response.jobId}`,
-      jobId: response.jobId,
-      action: "sync_review",
-      status: "queued",
-      createdAt: new Date().toISOString(),
-      retryCount: 0,
-      payloadSummary: `${cues.length} generated cue(s) ready for review sync.`
-    }]);
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const job = await apiFetch<BackendJobRecord>(`/v1/jobs/${encodeURIComponent(jobId)}`, { method: "GET" });
+        if (job.progress) {
+          setProgress(job.progress);
+          setStatus(job.progress.message);
+        }
+        if (job.status === "failed" || job.status === "complete") {
+          return;
+        }
+      } catch {
+        // The analyze request is still the source of truth; polling is only for UX.
+      }
+      if (!cancelled) {
+        window.setTimeout(poll, 600);
+      }
+    };
+
+    window.setTimeout(poll, 250);
+    return () => {
+      cancelled = true;
+    };
   }
 
   async function apiFetch<T>(path: string, init: RequestInit): Promise<T> {
     const response = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
       headers: {
-        "Authorization": `Bearer ${API_TOKEN}`,
+        Authorization: `Bearer ${API_TOKEN}`,
         "Content-Type": "application/json",
         ...init.headers
       }
     });
-
     if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Backend request failed (${response.status}). ${body}`);
+      throw new Error(`Backend request failed with ${response.status}.`);
     }
-
     return response.json() as Promise<T>;
   }
 
-  async function sendNativeAction(method: string, params: unknown): Promise<NativeActionResult> {
-    const response = await chrome.runtime.sendMessage({ name: "NATIVE_ACTION_REQUESTED", method, params });
-    if (response?.ok === false || response?.status === "error") {
-      throw new Error(response.message ?? "Native companion action failed.");
+  async function askNow() {
+    const result = await chrome.runtime.sendMessage({ name: "ACCESSIBILITY_DESCRIBE_NOW_REQUESTED" }) as StartResult;
+    setStatus(result?.ok ? result.text ?? "Describing the current moment." : result?.message ?? "Start describing first.");
+  }
+
+  async function stopDescribing() {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
     }
-    return response;
+    await chrome.runtime.sendMessage({ name: "ACCESSIBILITY_MODE_STOP_REQUESTED" });
+    setActive(false);
+    setStatus("Stopped. Press Describe this video to start again.");
   }
 
-  async function updateCue(cueId: string, changes: Partial<ReviewCue>, syncReview = false) {
-    const nextCue = reviewCues.find((cue) => cue.id === cueId);
-    const updatedCue = nextCue ? { ...nextCue, ...changes } : null;
-    setReviewCues((cues) => cues.map((cue) => cue.id === cueId ? { ...cue, ...changes } : cue));
-    setPlaybackPackageState((current) => current ? {
-      ...current,
-      cues: current.cues.map((cue) => cue.id === cueId ? { ...cue, ...changes } : cue)
-    } : current);
-    setLiveMessage("Review cue updated.");
-    if (syncReview && updatedCue && playbackPackageState?.jobId) {
-      await submitReview(playbackPackageState.jobId, updatedCue);
+  async function primaryAction() {
+    if (active) {
+      await stopDescribing();
+      return;
+    }
+    const detected = snapshot ?? (await scanPage());
+    if (detected) {
+      await startAccessibilityMode(detected);
     }
   }
-
-  async function submitReview(jobId: string, cue: ReviewCue) {
-    await apiFetch(`/v1/jobs/${encodeURIComponent(jobId)}/review`, {
-      method: "POST",
-      body: JSON.stringify({
-        cueId: cue.id,
-        text: cue.text,
-        confidence: cue.confidence,
-        notes: cue.notes
-      })
-    });
-    setOfflineQueueState((items) => items.map((item) => item.jobId === jobId ? {
-      ...item,
-      status: "complete",
-      payloadSummary: `Review cue ${cue.id} synced to backend.`
-    } : item));
-    setLiveMessage("Review cue synced to backend.");
-  }
-
-  async function rememberCuePreference(cue: ReviewCue) {
-    const sourceJobId = playbackPackageState?.jobId ?? "manual";
-    const memory: MemoryPreference = {
-      id: `mem-${cue.id}`,
-      scope: "user",
-      subjectId: "demo-user",
-      kind: "reviewer_correction",
-      value: cue.text,
-      confidence: Math.max(cue.confidence, 0.75),
-      sourceJobId,
-      reviewerId: "reviewer-demo",
-      createdAt: new Date().toISOString()
-    };
-    await apiFetch("/v1/memory/preferences", {
-      method: "POST",
-      body: JSON.stringify({
-        scope: memory.scope,
-        subjectId: memory.subjectId,
-        kind: memory.kind,
-        preference: memory.value,
-        confidence: memory.confidence,
-        sourceJobId: memory.sourceJobId,
-        reviewerId: memory.reviewerId
-      })
-    });
-    setMemories((items) => [memory, ...items.filter((item) => item.id !== memory.id)]);
-    setLiveMessage("Preference saved to memory audit.");
-  }
-
-  function forgetMemory(memoryId: string) {
-    setMemories((items) => items.filter((memory) => memory.id !== memoryId));
-    setLiveMessage("Memory preference removed.");
-  }
-
-  const selectedCue = reviewCues.find((cue) => cue.id === selectedCueId) ?? reviewCues[0];
 
   return (
     <main className="panel" aria-labelledby="panel-title">
       <header className="panel-header">
-        <h1 id="panel-title" className="title">DescribeOps</h1>
-        <p className="muted">Detect, generate, review, and play accessible media support.</p>
+        <h1 id="panel-title" className="title">Describe this video</h1>
+        <p className="muted">
+          {focusedMedia ? describePlatform(focusedMedia) : "Accessible video assistant"}
+        </p>
       </header>
-      <div className="sr-only" role="status" aria-live="polite">{liveMessage}</div>
-      <Tabs.Root defaultValue="detect">
-        <Tabs.List className="tab-list" aria-label="DescribeOps workflow">
-          {["Detect", "Generate", "Review", "Playback", "Settings"].map((label) => (
-            <Tabs.Trigger key={label} className="tab-trigger" value={label.toLowerCase()}>
-              {label}
-            </Tabs.Trigger>
-          ))}
-        </Tabs.List>
 
-        <Tabs.Content className="tab-content" value="detect">
-          <button type="button" onClick={scanPage}>Scan current page</button>
-          <button type="button" className="secondary" onClick={checkCompanion}>Check companion</button>
-          {liveMessage.startsWith("Scan failed") || liveMessage.includes("did not receive") || liveMessage.includes("could not scan") ? (
-            <p className="status warning" role="alert">{liveMessage}</p>
-          ) : null}
-          <section className="summary-grid" aria-label="Scan summary">
-            <Metric label="Media" value={summary.media} />
-            <Metric label="Headings" value={summary.headings} />
-            <Metric label="Text blocks" value={summary.text} />
-            <Metric label="Needs sampling" value={summary.issues} />
-          </section>
-          {snapshot ? <SnapshotDetails snapshot={snapshot} /> : <p className="muted">No scan has run yet.</p>}
-          {health ? <HealthDetails health={health} /> : null}
-        </Tabs.Content>
+      <p className="status" role="status" aria-live="assertive">{status}</p>
 
-        <Tabs.Content className="tab-content" value="generate">
-          <GeneratePanel
-            snapshot={snapshot}
-            selectedMediaId={selectedMediaId}
-            generationJob={generationJob}
-            generationBusy={generationBusy}
-            generationMode={generationMode}
-            liveMessage={liveMessage}
-            onSelectMedia={setSelectedMediaId}
-            onChangeMode={setGenerationMode}
-            onCreateJob={createGenerationJob}
-          />
-        </Tabs.Content>
+      <ProgressRail progress={progress} cueCount={cues.length} chunkCount={chunkCount} />
 
-        <Tabs.Content className="tab-content" value="review">
-          <ReviewPanel
-            cues={reviewCues}
-            selectedCue={selectedCue}
-            selectedCueId={selectedCueId}
-            onSelectCue={setSelectedCueId}
-            onUpdateCue={updateCue}
-            onRememberCue={rememberCuePreference}
-          />
-        </Tabs.Content>
+      <div className="primary-actions">
+        <button type="button" className="primary-big" onClick={primaryAction} disabled={busy} aria-pressed={active}>
+          {busy ? "Working..." : active ? "Stop describing" : "Describe this video"}
+        </button>
+        <button type="button" className="secondary" onClick={askNow} disabled={!active}>
+          What is on screen now?
+        </button>
+      </div>
 
-        <Tabs.Content className="tab-content" value="playback">
-          <PlaybackPanel packageData={playbackPackageState} artifacts={exportArtifactsState} queue={offlineQueueState} />
-        </Tabs.Content>
+      <p className="hint">
+        Shortcuts: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> describe now &middot;{" "}
+        <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>A</kbd> pause descriptions. The video pauses automatically while a
+        description is spoken, so the audio never overlaps.
+      </p>
 
-        <Tabs.Content className="tab-content" value="settings">
-          <MemoryPanel memories={memories} onForget={forgetMemory} />
-        </Tabs.Content>
-      </Tabs.Root>
+      <SpokenLog cues={cues} />
     </main>
   );
 }
 
-function GeneratePanel({
-  snapshot,
-  selectedMediaId,
-  generationJob,
-  generationBusy,
-  generationMode,
-  liveMessage,
-  onSelectMedia,
-  onChangeMode,
-  onCreateJob
-}: {
-  snapshot: PageAccessibilitySnapshot | null;
-  selectedMediaId: string;
-  generationJob: GenerationJob | null;
-  generationBusy: boolean;
-  generationMode: "standard" | "low_bandwidth";
-  liveMessage: string;
-  onSelectMedia: (mediaId: string) => void;
-  onChangeMode: (mode: "standard" | "low_bandwidth") => void;
-  onCreateJob: () => void;
-}) {
-  const media = snapshot?.media ?? [];
-  const selectedMedia = media.find((item) => item.id === selectedMediaId) ?? media[0];
-  const cannotCreate = generationBusy || !snapshot || !selectedMedia;
-  const failed = liveMessage.startsWith("Generation job failed");
+function ProgressRail({ progress, cueCount, chunkCount }: { progress: JobProgress | null; cueCount: number; chunkCount: number }) {
+  const activeStage = progress?.stage ?? "queued";
+  const percent = progress?.percent ?? 0;
+  const stages: Array<{ id: JobProgress["stage"]; label: string }> = [
+    { id: "resolving_media", label: "Media" },
+    { id: "sampling_frames", label: "Frames" },
+    { id: "analyzing_chunk", label: "Analysis" },
+    { id: "building_playback", label: "Playback" },
+    { id: "complete", label: "Ready" }
+  ];
+  const activeIndex = stages.findIndex((stage) => stage.id === activeStage);
+  const doneIndex = activeStage === "complete" ? stages.length - 1 : activeIndex - 1;
 
   return (
-    <section aria-labelledby="generate-title">
-      <div className="section-heading">
-        <h2 id="generate-title">Generate descriptions</h2>
-        <span className={generationJob ? "badge success" : "badge"}>{generationJob ? generationJob.status : "not queued"}</span>
+    <section className="analysis-progress" aria-label="Analysis progress">
+      <div className="progress-meter" aria-hidden="true">
+        <span style={{ width: `${percent}%` }} />
       </div>
-
-      {!snapshot ? (
-        <p className="status warning">Scan the current page first so DescribeOps knows which media to process.</p>
-      ) : null}
-
-      <label className="field">
-        Media
-        <select
-          value={selectedMedia?.id ?? ""}
-          disabled={!media.length || generationBusy}
-          onChange={(event) => onSelectMedia(event.target.value)}
-        >
-          {media.length ? media.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label} - {item.kind}
-            </option>
-          )) : <option value="">No media detected</option>}
-        </select>
-      </label>
-
-      <label className="field">
-        Processing mode
-        <select
-          value={generationMode}
-          disabled={generationBusy}
-          onChange={(event) => onChangeMode(event.target.value as "standard" | "low_bandwidth")}
-        >
-          <option value="low_bandwidth">Low-bandwidth sampling</option>
-          <option value="standard">Standard evidence package</option>
-        </select>
-      </label>
-
-      {selectedMedia ? (
-        <div className="status">
-          <p><strong>Source:</strong> {selectedMedia.source ?? snapshot?.url}</p>
-          <p><strong>Captions:</strong> {selectedMedia.hasCaptions ? "detected" : "not detected"}</p>
-          <p><strong>Sampling flags:</strong> {snapshot?.inaccessibleRegions.length ?? 0}</p>
-        </div>
-      ) : null}
-
-      <button type="button" onClick={onCreateJob} disabled={cannotCreate}>
-        {generationBusy ? "Creating job..." : "Create generation job"}
-      </button>
-
-      {failed ? <p className="status warning" role="alert">{liveMessage}</p> : null}
-
-      {generationJob ? (
-        <div className="status success">
-          <p><strong>Backend job:</strong> {generationJob.backendJobId ?? "not created"}</p>
-          {generationJob.traceId ? <p><strong>Trace:</strong> {generationJob.traceId}</p> : null}
-          <p><strong>Backend status:</strong> {generationJob.backendStatus ?? "not started"}</p>
-          <p><strong>Local job:</strong> {generationJob.jobId}</p>
-          <p><strong>Media:</strong> {generationJob.media.label}</p>
-          <p><strong>Mode:</strong> {generationJob.mode === "low_bandwidth" ? "low-bandwidth sampling" : "standard evidence package"}</p>
-          {generationJob.artifactPath ? <p><strong>Artifacts:</strong> {generationJob.artifactPath}</p> : null}
-          {generationJob.storagePath ? <p><strong>Queue:</strong> {generationJob.storagePath}</p> : null}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function ReviewPanel({
-  cues,
-  selectedCue,
-  selectedCueId,
-  onSelectCue,
-  onUpdateCue,
-  onRememberCue
-}: {
-  cues: ReviewCue[];
-  selectedCue?: ReviewCue;
-  selectedCueId: string;
-  onSelectCue: (cueId: string) => void;
-  onUpdateCue: (cueId: string, changes: Partial<ReviewCue>, syncReview?: boolean) => void;
-  onRememberCue: (cue: ReviewCue) => void;
-}) {
-  if (!selectedCue) {
-    return <p className="status warning">Generate descriptions first. Review cues from the backend will appear here.</p>;
-  }
-
-  return (
-    <section aria-labelledby="review-title">
-      <div className="section-heading">
-        <h2 id="review-title">Review queue</h2>
-        <span className="badge">{cues.filter((cue) => cue.status === "needs_review").length} open</span>
-      </div>
-      <label className="field">
-        Cue
-        <select value={selectedCueId} onChange={(event) => onSelectCue(event.target.value)}>
-          {cues.map((cue) => (
-            <option key={cue.id} value={cue.id}>
-              {cue.id} - {cue.impact} impact
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="field">
-        Description text
-        <textarea
-          value={selectedCue.text}
-          rows={4}
-          onChange={(event) => onUpdateCue(selectedCue.id, { text: event.target.value, status: "edited" })}
-        />
-      </label>
-      <div className="cue-meta" aria-label="Cue timing and confidence">
-        <span>{selectedCue.start.toFixed(1)}s-{selectedCue.end.toFixed(1)}s</span>
-        <span>{Math.round(selectedCue.confidence * 100)}% confidence</span>
-        <span>{selectedCue.impact} impact</span>
-      </div>
-      {selectedCue.qaWarnings.length ? (
-        <div className="status warning" role="note">
-          <strong>QA warning:</strong> {selectedCue.qaWarnings.join(" ")}
-        </div>
-      ) : null}
-      <div className="button-row">
-        <button type="button" onClick={() => onUpdateCue(selectedCue.id, { status: "accepted", needsReview: false }, true)}>
-          Accept cue
-        </button>
-        <button type="button" className="secondary" onClick={() => onUpdateCue(selectedCue.id, { status: "rejected" }, true)}>
-          Reject cue
-        </button>
-        <button type="button" className="secondary" onClick={() => onUpdateCue(selectedCue.id, { status: "edited" }, true)}>
-          Sync edit
-        </button>
-        <button type="button" className="secondary" onClick={() => onRememberCue(selectedCue)}>
-          Remember wording
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function PlaybackPanel({
-  packageData,
-  artifacts,
-  queue
-}: {
-  packageData: PlaybackPackage | null;
-  artifacts: ExportArtifact[];
-  queue: OfflineQueueItem[];
-}) {
-  if (!packageData) {
-    return <p className="status warning">Generate descriptions first. Playback packages from the backend will appear here.</p>;
-  }
-
-  const approved = packageData.cues.filter((cue) => cue.status === "accepted" || cue.status === "edited").length;
-  const playableCues = packageData.cues.filter((cue) => cue.status !== "rejected");
-
-  function speakCues() {
-    if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-    const text = playableCues.map((cue) => cue.text).join(" ");
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 0.95;
-    window.speechSynthesis.speak(utterance);
-  }
-
-  function stopSpeech() {
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
-  }
-
-  return (
-    <section aria-labelledby="playback-title">
-      <div className="section-heading">
-        <h2 id="playback-title">Playback and exports</h2>
-        <span className={packageData.offlineAvailable ? "badge success" : "badge"}>Offline package ready</span>
-      </div>
-      <div className="status">
-        <p><strong>{approved}</strong> reviewed cue(s) ready for synchronized playback.</p>
-        <p><strong>{playableCues.length}</strong> cue(s) available for browser text-to-speech.</p>
-        <p>Ducking is {packageData.ducking.enabled ? `enabled at ${Math.round(packageData.ducking.level * 100)}%` : "disabled"}.</p>
-      </div>
-      <div className="button-row">
-        <button type="button" onClick={speakCues} disabled={!playableCues.length}>
-          Play descriptions
-        </button>
-        <button type="button" className="secondary" onClick={stopSpeech}>
-          Stop
-        </button>
-      </div>
-      <h3>Speech gaps</h3>
-      <ol className="timeline">
-        {packageData.speechGaps.map((gap) => (
-          <li key={`${gap.start}-${gap.end}`}>
-            <span>{gap.start.toFixed(1)}s</span>
-            <meter min={0} max={60} value={gap.end} aria-label={`Speech gap ending at ${gap.end.toFixed(1)} seconds`} />
-            <span>{gap.end.toFixed(1)}s</span>
+      <ol className="progress-steps">
+        {stages.map((stage, index) => (
+          <li
+            key={stage.id}
+            data-state={activeStage === "failed" ? "failed" : index <= doneIndex ? "done" : index === activeIndex ? "running" : "waiting"}
+          >
+            <span />
+            {stage.label}
           </li>
         ))}
       </ol>
-      <h3>Exports</h3>
-      <ul className="list">
-        {artifacts.map((artifact) => (
-          <li key={artifact.id}>
-            <strong>{artifact.filename}</strong> - {artifact.kind.toUpperCase()} - {Math.ceil(artifact.sizeBytes / 1024)} KB
-          </li>
-        ))}
-      </ul>
-      <h3>Offline queue</h3>
-      <ul className="list">
-        {queue.map((item) => (
-          <li key={item.id}>{item.payloadSummary} Status: {item.status}.</li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function MemoryPanel({ memories, onForget }: { memories: MemoryPreference[]; onForget: (memoryId: string) => void }) {
-  return (
-    <section aria-labelledby="memory-title">
-      <div className="section-heading">
-        <h2 id="memory-title">Memory audit</h2>
-        <span className="badge">{memories.length} active</span>
+      <div className="progress-meta" aria-live="polite">
+        <strong>{progress?.partialCueCount ?? cueCount}</strong>
+        <span>cues</span>
+        <strong>{progress?.totalChunks || chunkCount}</strong>
+        <span>segments</span>
       </div>
-      <p className="muted">Saved preferences are scoped, attributed, and removable. Content-specific visual facts stay attached to a single job.</p>
-      <ul className="memory-list">
-        {memories.map((memory) => (
-          <li key={memory.id}>
-            <div>
-              <strong>{memory.kind.replaceAll("_", " ")}</strong>
-              <p>{memory.value}</p>
-              <small>{memory.scope}:{memory.subjectId} - {Math.round(memory.confidence * 100)}% confidence - source {memory.sourceJobId}</small>
-            </div>
-            <button type="button" className="secondary" onClick={() => onForget(memory.id)}>
-              Forget
-            </button>
+    </section>
+  );
+}
+
+function SpokenLog({ cues }: { cues: ReviewCue[] }) {
+  if (!cues.length) {
+    return <p className="muted">Descriptions of the video will appear here as it plays.</p>;
+  }
+
+  return (
+    <section aria-labelledby="log-title">
+      <h2 id="log-title" className="section-title">Spoken descriptions</h2>
+      <ol className="timeline">
+        {cues.map((cue) => (
+          <li key={cue.id}>
+            <time>{formatClock(cue.start)}</time>
+            <p>{cue.text}</p>
           </li>
         ))}
-      </ul>
+      </ol>
     </section>
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="metric">
-      <strong>{value}</strong>
-      <span>{label}</span>
-    </div>
-  );
+function describePlatform(media: DetectedMedia): string {
+  switch (media.platform) {
+    case "youtube":
+      return "YouTube video";
+    case "tiktok":
+      return "TikTok video";
+    case "instagram":
+      return "Instagram video";
+    case "twitter":
+      return "X (Twitter) video";
+    case "facebook":
+      return "Facebook video";
+    case "vimeo":
+      return "Vimeo video";
+    case "twitch":
+      return "Twitch stream";
+    case "generic":
+      return media.kind === "embedded-player" ? "Embedded video player" : "Video";
+    default: {
+      const exhaustive: never = media.platform;
+      return exhaustive;
+    }
+  }
 }
 
-function SnapshotDetails({ snapshot }: { snapshot: PageAccessibilitySnapshot }) {
-  return (
-    <section aria-labelledby="scan-details">
-      <h2 id="scan-details">Scan details</h2>
-      <p><strong>Title:</strong> {snapshot.title}</p>
-      <h3>Media</h3>
-      <ul className="list">
-        {snapshot.media.map((media) => (
-          <li key={media.id}>{media.label} ({media.kind}) {media.hasCaptions ? "with captions" : "without detected captions"}</li>
-        ))}
-      </ul>
-      <h3>Readable text</h3>
-      <ul className="list">
-        {snapshot.visibleText.slice(0, 5).map((text) => <li key={text}>{text}</li>)}
-      </ul>
-    </section>
-  );
-}
-
-function HealthDetails({ health }: { health: NativeHealth }) {
-  return (
-    <section className={health.status === "ok" ? "status" : "status warning"} aria-labelledby="companion-health">
-      <h2 id="companion-health">Companion</h2>
-      <p>{health.status === "ok" ? `Version ${health.version}` : health.message}</p>
-      {health.storagePath ? <p><strong>Storage:</strong> {health.storagePath}</p> : null}
-      {health.supportedTools ? <p><strong>Tools:</strong> {health.supportedTools.join(", ")}</p> : null}
-      {health.ffmpeg && !health.ffmpeg.available ? <p>{health.ffmpeg.remediation}</p> : null}
-    </section>
-  );
+function formatClock(seconds: number): string {
+  const safe = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+  const minutes = Math.floor(safe / 60);
+  const remainder = safe % 60;
+  return `${minutes}:${remainder.toString().padStart(2, "0")}`;
 }
 
 createRoot(document.getElementById("root")!).render(

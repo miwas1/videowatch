@@ -4,28 +4,68 @@ import type {
   PageAccessibilitySnapshot
 } from "@describeops/shared";
 
+type VideoPlatform = DetectedMedia["platform"];
+
 const TEXT_LIMIT = 40;
+const TINY_VIDEO_AREA = 12_000;
+
+// Boilerplate chrome that should never be spoken as a "description".
+const NOISE_PATTERNS = [
+  /^skip( to)?( main)?( navigation| content| to content)?$/i,
+  /^(sign in|sign up|log in|log out|subscribe|share|save|more|menu|search|home|settings|help)$/i,
+  /^(next|previous|play|pause|mute|unmute|like|dislike|comment|notifications?)$/i,
+  /^(accept|reject|got it|ok|close|dismiss)( all)?( cookies?)?$/i,
+  /cookie|consent|advertisement|^ad$|sponsored/i,
+  /^\d+(\.\d+)?[KMB]?\s*(views?|likes?|subscribers?|comments?)$/i
+];
+
+const SOCIAL_PLATFORMS: ReadonlySet<VideoPlatform> = new Set([
+  "tiktok",
+  "instagram",
+  "twitter",
+  "facebook"
+]);
 
 export function scanDocument(doc: Document = document): PageAccessibilitySnapshot {
+  const platform = detectPlatform(doc);
   return {
     url: doc.location?.href ?? "",
     title: documentTitle(doc),
-    media: collectMedia(doc),
+    media: collectMedia(doc, platform),
     headings: collectHeadings(doc),
     landmarks: collectLandmarks(doc),
     visibleText: collectVisibleText(doc),
     transcriptText: collectTranscriptText(doc),
     captions: collectCaptions(doc),
+    liveCaptionText: collectLiveCaptionText(doc),
+    platform,
     inaccessibleRegions: collectInaccessibleRegions(doc)
   };
 }
 
-function collectMedia(doc: Document): DetectedMedia[] {
+function detectPlatform(doc: Document): VideoPlatform {
+  const host = doc.location?.hostname.toLowerCase() ?? "";
+  if (/(^|\.)youtube\.com$/.test(host) || host === "youtu.be") return "youtube";
+  if (/(^|\.)tiktok\.com$/.test(host)) return "tiktok";
+  if (/(^|\.)instagram\.com$/.test(host)) return "instagram";
+  if (/(^|\.)(twitter\.com|x\.com)$/.test(host)) return "twitter";
+  if (/(^|\.)(facebook\.com|fb\.watch)$/.test(host)) return "facebook";
+  if (/(^|\.)vimeo\.com$/.test(host)) return "vimeo";
+  if (/(^|\.)twitch\.tv$/.test(host)) return "twitch";
+  return "generic";
+}
+
+function collectMedia(doc: Document, platform: VideoPlatform): DetectedMedia[] {
   const media: DetectedMedia[] = [];
+  const isSocial = SOCIAL_PLATFORMS.has(platform);
 
   doc.querySelectorAll<HTMLVideoElement | HTMLAudioElement>("video, audio").forEach((element, index) => {
+    if (!isPlayableMediaElement(element)) {
+      return;
+    }
+
     const kind = element instanceof HTMLAudioElement ? "audio" : "video";
-    const source = element.currentSrc || element.querySelector("source")?.getAttribute("src") || undefined;
+    const source = element.currentSrc || element.getAttribute("src") || element.querySelector("source")?.getAttribute("src") || undefined;
     const tracks = Array.from(element.querySelectorAll("track"));
 
     media.push({
@@ -37,31 +77,90 @@ function collectMedia(doc: Document): DetectedMedia[] {
       width: kind === "video" ? finiteOrUndefined((element as HTMLVideoElement).videoWidth || element.clientWidth || element.getAttribute("width")) : undefined,
       height: kind === "video" ? finiteOrUndefined((element as HTMLVideoElement).videoHeight || element.clientHeight || element.getAttribute("height")) : undefined,
       hasCaptions: tracks.some((track) => ["captions", "subtitles"].includes(track.kind)),
-      source
+      source,
+      platform,
+      isSocial,
+      isPlaying: isMediaPlaying(element),
+      isFocused: false
     });
   });
 
-  doc.querySelectorAll<HTMLIFrameElement>("iframe").forEach((frame, index) => {
-    const title = frame.title || frame.getAttribute("aria-label") || frame.src || "Embedded player";
-    if (looksLikeEmbeddedPlayer(frame)) {
-      media.push({
-        id: `embedded-player-${index}`,
-        kind: "embedded-player",
-        label: title,
-        width: finiteOrUndefined(frame.width || frame.clientWidth),
-        height: finiteOrUndefined(frame.height || frame.clientHeight),
-        hasCaptions: false,
-        source: frame.src || undefined
-      });
-    }
-  });
+  // Only surface iframe players when there is no directly attachable media,
+  // because an <iframe> cannot be controlled or sampled from the content script.
+  if (!media.some((item) => item.kind !== "audio")) {
+    doc.querySelectorAll<HTMLIFrameElement>("iframe").forEach((frame, index) => {
+      const title = frame.title || frame.getAttribute("aria-label") || frame.src || "Embedded player";
+      if (looksLikeEmbeddedPlayer(frame)) {
+        media.push({
+          id: `embedded-player-${index}`,
+          kind: "embedded-player",
+          label: title,
+          width: finiteOrUndefined(frame.width || frame.clientWidth),
+          height: finiteOrUndefined(frame.height || frame.clientHeight),
+          hasCaptions: false,
+          source: frame.src || undefined,
+          platform,
+          isSocial,
+          isPlaying: false,
+          isFocused: false
+        });
+      }
+    });
+  }
 
   const youtubeMedia = detectYouTubeWatchPage(doc, media.length);
   if (youtubeMedia && !media.some((item) => item.source === youtubeMedia.source)) {
     media.push(youtubeMedia);
   }
 
-  return media;
+  const ranked = rankMediaByFocus(doc, media);
+  if (ranked.length) {
+    ranked[0].isFocused = true;
+  }
+  return ranked;
+}
+
+function isMediaPlaying(element: HTMLVideoElement | HTMLAudioElement): boolean {
+  return !element.paused && !element.ended && element.readyState > 2 && element.currentTime > 0;
+}
+
+// The video "in focus" is the one the user is actually watching: prefer a
+// playing element, then the one most centered and largest in the viewport.
+function rankMediaByFocus(doc: Document, media: DetectedMedia[]): DetectedMedia[] {
+  const view = doc.defaultView;
+  const viewportHeight = view?.innerHeight ?? 0;
+  const viewportWidth = view?.innerWidth ?? 0;
+  const elements = new Map<string, Element>();
+  doc.querySelectorAll<HTMLVideoElement | HTMLAudioElement>("video, audio").forEach((element, index) => {
+    const kind = element instanceof HTMLAudioElement ? "audio" : "video";
+    elements.set(`${kind}-${index}`, element);
+  });
+
+  const score = (item: DetectedMedia): number => {
+    let value = 0;
+    if (item.kind === "audio") value -= 5_000_000;
+    if (item.kind === "embedded-player") value -= 2_000_000;
+    if (item.isPlaying) value += 8_000_000;
+
+    const element = elements.get(item.id);
+    const rect = element?.getBoundingClientRect?.();
+    if (rect && viewportHeight && viewportWidth && rect.width * rect.height > 0) {
+      const visibleHeight = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0));
+      const visibleWidth = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0));
+      value += visibleHeight * visibleWidth;
+      const viewportCenter = viewportHeight / 2;
+      const elementCenter = rect.top + rect.height / 2;
+      value -= Math.abs(elementCenter - viewportCenter);
+    } else {
+      value += area(item);
+    }
+    return value;
+  };
+
+  return media
+    .map((item) => ({ item, value: score(item) }))
+    .sort((a, b) => b.value - a.value)
+    .map((entry) => entry.item);
 }
 
 function collectHeadings(doc: Document): string[] {
@@ -86,13 +185,55 @@ function collectVisibleText(doc: Document): string[] {
 
   while (node && text.length < TEXT_LIMIT) {
     const value = node.textContent?.replace(/\s+/g, " ").trim();
-    if (value && value.length > 2 && isElementVisible(node.parentElement)) {
+    if (value && value.length > 2 && isElementVisible(node.parentElement) && !isNoiseText(value) && !isInteractiveChrome(node.parentElement)) {
       text.push(value);
     }
     node = walker.nextNode();
   }
 
   return unique(text);
+}
+
+// Filters out navigation/control boilerplate so the assistant never speaks
+// page chrome (e.g. "Skip navigation", "Subscribe") as a video description.
+function isNoiseText(value: string): boolean {
+  if (NOISE_PATTERNS.some((pattern) => pattern.test(value))) return true;
+  // Single short tokens are almost always buttons or labels, not content.
+  return value.length < 12 && !/\s/.test(value);
+}
+
+function isInteractiveChrome(element: Element | null): boolean {
+  let current: Element | null = element;
+  let depth = 0;
+  while (current && depth < 4) {
+    const tag = current.tagName?.toLowerCase();
+    if (tag === "button" || tag === "a" || tag === "nav") return true;
+    const role = current.getAttribute?.("role");
+    if (role && ["button", "navigation", "link", "menu", "menuitem", "tab"].includes(role)) return true;
+    current = current.parentElement;
+    depth += 1;
+  }
+  return false;
+}
+
+// Live caption/subtitle text currently rendered over the player. This is the
+// strongest signal for what the focused video is actually about right now.
+function collectLiveCaptionText(doc: Document): string[] {
+  const selectors = [
+    ".ytp-caption-segment",
+    ".caption-window",
+    ".captions-text",
+    "[class*='caption' i] span",
+    "[class*='subtitle' i] span",
+    "[aria-label*='caption' i]"
+  ];
+  return unique(
+    selectors.flatMap((selector) =>
+      Array.from(doc.querySelectorAll(selector))
+        .filter((element) => isElementVisible(element))
+        .map((element) => firstText(element))
+    ).filter((value) => value && !isNoiseText(value))
+  ).slice(0, 12);
 }
 
 function collectTranscriptText(doc: Document): string[] {
@@ -183,7 +324,11 @@ function detectYouTubeWatchPage(doc: Document, index: number): DetectedMedia | n
     hasCaptions: Boolean(
       doc.querySelector(".ytp-subtitles-button, track[kind='captions'], track[kind='subtitles']")
     ),
-    source: doc.location?.href
+    source: doc.location?.href,
+    platform: "youtube",
+    isSocial: false,
+    isPlaying: video ? isMediaPlaying(video) : false,
+    isFocused: false
   };
 }
 
@@ -222,7 +367,23 @@ function isElementVisible(element: Element | null): boolean {
   const htmlElement = element as HTMLElement;
   if (htmlElement.hidden || htmlElement.getAttribute("aria-hidden") === "true") return false;
   const style = element.ownerDocument.defaultView?.getComputedStyle(htmlElement);
-  return style ? style.display !== "none" && style.visibility !== "hidden" : true;
+  return style ? style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" : true;
+}
+
+function isPlayableMediaElement(element: HTMLVideoElement | HTMLAudioElement): boolean {
+  if (!isElementVisible(element)) return false;
+  if (element instanceof HTMLAudioElement) return Boolean(element.controls || element.currentSrc || element.getAttribute("src"));
+
+  const width = finiteOrUndefined(element.videoWidth || element.clientWidth || element.getAttribute("width")) ?? 0;
+  const height = finiteOrUndefined(element.videoHeight || element.clientHeight || element.getAttribute("height")) ?? 0;
+  const hasExplicitTinySize = width > 0 && height > 0 && width * height < TINY_VIDEO_AREA;
+  if (hasExplicitTinySize) return false;
+
+  return !element.hasAttribute("disabled");
+}
+
+function area(item: DetectedMedia): number {
+  return (item.width ?? 300) * (item.height ?? 150);
 }
 
 function looksLikeEmbeddedPlayer(frame: HTMLIFrameElement): boolean {

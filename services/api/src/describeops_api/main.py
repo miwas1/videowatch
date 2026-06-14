@@ -11,7 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import load_root_env
 from .gateway import ModelPurpose, QwenGateway
+from .media_analysis import analyze_media_job, asset_storage_path
 from .schemas import (
+    AnalysisStage,
     JobCreateRequest,
     JobRecord,
     MemoryPreference,
@@ -134,10 +136,13 @@ def create_app() -> FastAPI:
         content = await file.read(max_bytes + 1)
         if len(content) > max_bytes:
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Asset exceeds upload limit")
+        storage_path = asset_storage_path(file.filename, file.content_type)
+        storage_path.write_bytes(content)
         asset = {
             "filename": file.filename,
             "contentType": file.content_type,
             "size": len(content),
+            "storagePath": str(storage_path),
             "authorized": True,
         }
         jobs.add_asset(job_id, asset)
@@ -158,7 +163,22 @@ def create_app() -> FastAPI:
         gateway: QwenGateway = Depends(get_gateway),
     ) -> dict:
         job = job_or_404(jobs, job_id)
-        status_value = "running" if gateway.configured else "needs_review"
+        if not gateway.configured:
+            jobs.update_status(job_id, "failed")
+            jobs.update_progress(
+                job_id,
+                stage="failed",
+                message="Qwen is not configured. Add an API key before starting AI analysis.",
+                percent=100,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "CONFIG_ERROR",
+                    "message": "QWEN_API_KEY is required before starting AI analysis jobs.",
+                },
+            )
+        status_value = "running"
         LOGGER.info(
             "job.analysis_requested jobId=%s traceId=%s mode=%s qwenConfigured=%s model=%s snapshot=%s",
             job.id,
@@ -169,25 +189,96 @@ def create_app() -> FastAPI:
             summarize_snapshot(job.snapshot),
         )
         jobs.update_status(job_id, status_value)
-        generated = build_accessibility_artifacts(job)
+        jobs.update_progress(
+            job_id,
+            stage="queued",
+            message="Analysis job accepted.",
+            percent=5,
+        )
+
+        qwen_payload: dict | None = None
+        qwen_error: str | None = None
+        analysis_artifacts: list[dict] = []
+
+        def record_progress(
+            stage: AnalysisStage,
+            message: str,
+            percent: int,
+            current_chunk: int | None,
+            total_chunks: int | None,
+            partial_cue_count: int | None,
+        ) -> None:
+            jobs.update_progress(
+                job_id,
+                stage=stage,
+                message=message,
+                percent=percent,
+                current_chunk=current_chunk,
+                total_chunks=total_chunks,
+                partial_cue_count=partial_cue_count,
+            )
+
+        try:
+            media_result = analyze_media_job(job, gateway=gateway, on_progress=record_progress)
+            qwen_payload = media_result.qwen_payload
+            analysis_artifacts = media_result.artifacts
+            LOGGER.info(
+                "job.qwen_described jobId=%s traceId=%s model=%s cues=%s",
+                job.id,
+                job.traceId,
+                gateway.model_for(ModelPurpose.MULTIMODAL_FRAME_ANALYSIS),
+                len(qwen_payload.get("cues", [])),
+            )
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully to deterministic cues
+            qwen_error = f"{type(exc).__name__}: {exc}"
+            jobs.update_progress(
+                job_id,
+                stage="building_playback",
+                message="Visual analysis was limited; building fallback descriptions.",
+                percent=82,
+            )
+            LOGGER.warning(
+                "job.qwen_failed jobId=%s traceId=%s error=%s",
+                job.id,
+                job.traceId,
+                qwen_error,
+            )
+
+        generated = build_accessibility_artifacts(job, qwen_payload=qwen_payload)
         plan_artifact = {
             "kind": "analysis-plan",
             "traceId": job.traceId,
             "mode": job.mode,
             "qwenConfigured": gateway.configured,
-            "model": gateway.model_for(ModelPurpose.TEXT_REASONING),
-            "note": "Backend generated deterministic review/playback artifacts from the submitted page snapshot. Qwen multimodal enrichment can replace this planner output when model execution is enabled.",
+            "qwenUsed": qwen_payload_used_model(qwen_payload),
+            "qwenError": qwen_error,
+            "model": gateway.model_for(ModelPurpose.MULTIMODAL_FRAME_ANALYSIS),
+            "videoSummary": (qwen_payload or {}).get("summary", ""),
+            "note": (
+                "Audio descriptions generated from chunked visual media analysis."
+                if qwen_payload_used_model(qwen_payload)
+                else "Visual model output was unavailable; generated video-focused fallback descriptions."
+            ),
         }
-        for artifact in [plan_artifact, *generated]:
+        for artifact in [plan_artifact, *analysis_artifacts, *generated]:
             jobs.add_artifact(job_id, artifact)
+        jobs.update_status(job_id, "complete")
+        jobs.update_progress(
+            job_id,
+            stage="complete",
+            message="Descriptions are ready.",
+            percent=100,
+            partial_cue_count=len(generated[0].get("cues", [])) if generated else 0,
+        )
         LOGGER.info(
-            "job.analysis_planned jobId=%s traceId=%s status=%s artifacts=%s",
+            "job.analysis_planned jobId=%s traceId=%s status=%s qwenUsed=%s artifacts=%s",
             job.id,
             job.traceId,
-            status_value,
-            [artifact["kind"] for artifact in [plan_artifact, *generated]],
+            "complete",
+            qwen_payload is not None,
+            [artifact["kind"] for artifact in [plan_artifact, *analysis_artifacts, *generated]],
         )
-        return {"id": job_id, "status": status_value, "traceId": job.traceId}
+        return {"id": job_id, "status": "complete", "traceId": job.traceId, "qwenUsed": qwen_payload_used_model(qwen_payload)}
 
     @app.get("/v1/jobs/{job_id}", response_model=JobRecord)
     def get_job(
@@ -342,35 +433,46 @@ def summarize_snapshot(snapshot) -> dict:
     }
 
 
-def build_accessibility_artifacts(job: JobRecord) -> list[dict]:
+def focused_media(snapshot) -> "DetectedMedia | None":
+    if not snapshot or not snapshot.media:
+        return None
+    playable = [m for m in snapshot.media if m.kind != "audio"] or list(snapshot.media)
+    focused = next((m for m in playable if m.isFocused), None)
+    return focused or playable[0]
+
+
+def build_video_context(snapshot) -> dict:
+    """Build a compact, video-only context payload for the Qwen prompt."""
+    media = focused_media(snapshot)
+    captions = list(snapshot.captions) if snapshot else []
+    live_caption = list(snapshot.liveCaptionText) if snapshot else []
+    transcript = list(snapshot.transcriptText) if snapshot else []
+    platform = media.platform if media else (snapshot.platform if snapshot else "generic")
+    return {
+        "videoTitle": (media.label if media else (snapshot.title if snapshot else "")),
+        "pageTitle": snapshot.title if snapshot else "",
+        "platform": platform,
+        "isSocial": bool(media.isSocial) if media else False,
+        "durationSeconds": media.duration if media else None,
+        "currentTimeSeconds": media.currentTime if media else None,
+        "hasCaptions": bool(media.hasCaptions) if media else False,
+        "liveCaptionText": live_caption[:12],
+        "captionTracks": captions[:6],
+        "transcript": transcript[:12],
+    }
+
+
+def build_accessibility_artifacts(job: JobRecord, *, qwen_payload: dict | None = None) -> list[dict]:
     snapshot = job.snapshot
     now = datetime.now(timezone.utc).isoformat()
-    media = snapshot.media[0] if snapshot and snapshot.media else None
+    media = focused_media(snapshot)
     media_id = media.id if media else "page"
-    title = snapshot.title if snapshot else "Untitled page"
-    source_label = media.label if media else title
-    visible_text = snapshot.visibleText if snapshot else []
     captions = snapshot.captions if snapshot else []
-    inaccessible = snapshot.inaccessibleRegions if snapshot else []
 
-    cue_texts = build_cue_texts(title=title, source_label=source_label, visible_text=visible_text, captions=captions, inaccessible_count=len(inaccessible))
-    cues = [
-        {
-            "id": f"cue-{index + 1}",
-            "start": round(index * 6.0 + 1.0, 1),
-            "end": round(index * 6.0 + 5.0, 1),
-            "text": text,
-            "evidenceRefs": [f"snapshot-{index + 1}"],
-            "confidence": 0.72 if index == 0 else 0.64,
-            "needsReview": True,
-            "notes": "Generated from browser-visible page evidence.",
-            "impact": "high" if index == 0 else "medium",
-            "qaWarnings": build_qa_warnings(captions=captions, inaccessible_count=len(inaccessible), index=index),
-            "status": "needs_review",
-            "rememberable": True,
-        }
-        for index, text in enumerate(cue_texts)
-    ]
+    cues = build_cues_from_qwen(qwen_payload) if qwen_payload else []
+    if not cues:
+        cues = build_fallback_video_cues(snapshot, media)
+
     speech_gaps = [{"start": cue["start"], "end": cue["end"]} for cue in cues]
     webvtt = render_webvtt(cues)
     qa_report = {
@@ -379,8 +481,8 @@ def build_accessibility_artifacts(job: JobRecord) -> list[dict]:
         "mode": job.mode,
         "cueCount": len(cues),
         "captionsDetected": bool(captions or (media and media.hasCaptions)),
-        "samplingFlags": len(inaccessible),
-        "warnings": sorted({warning for cue in cues for warning in cue["qaWarnings"]}),
+        "source": "qwen-frame-list" if qwen_payload_used_model(qwen_payload) else "deterministic-fallback",
+        "videoSummary": (qwen_payload or {}).get("summary", ""),
         "generatedAt": now,
     }
 
@@ -429,30 +531,103 @@ def build_accessibility_artifacts(job: JobRecord) -> list[dict]:
     ]
 
 
-def build_cue_texts(*, title: str, source_label: str, visible_text: list[str], captions: list[str], inaccessible_count: int) -> list[str]:
-    readable_context = next((text for text in visible_text if text and text != title), "")
-    caption_context = f" Captions are available for timing support." if captions else ""
-    sampling_context = (
-        f" {inaccessible_count} visual region(s) were flagged for reviewer confirmation."
-        if inaccessible_count
-        else ""
-    )
-    first = f"{source_label} is the active media on the page.{caption_context}{sampling_context}".strip()
-    second = (
-        f"The page context highlights {readable_context}."
-        if readable_context
-        else f"The page title is {title}."
-    )
-    return [first, second]
+def qwen_payload_used_model(qwen_payload: dict | None) -> bool:
+    if not qwen_payload:
+        return False
+    return any(chunk.get("transport") == "qwen-frame-list" for chunk in qwen_payload.get("chunks", []))
 
 
-def build_qa_warnings(*, captions: list[str], inaccessible_count: int, index: int) -> list[str]:
-    warnings: list[str] = []
-    if index == 0 and not captions:
-        warnings.append("No caption track text was available; confirm timing manually.")
-    if inaccessible_count:
-        warnings.append("Visual sampling flags need human confirmation before publishing.")
-    return warnings
+IMPORTANCE_TO_IMPACT = {"high": "high", "medium": "medium", "low": "low"}
+
+
+def build_cues_from_qwen(payload: dict) -> list[dict]:
+    """Convert Qwen's described cues into playback cues (no human review step)."""
+    cues: list[dict] = []
+    for index, raw in enumerate(payload.get("cues", [])):
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("text", "")).strip()
+        if not text:
+            continue
+        start = _coerce_float(raw.get("start"), default=index * 6.0 + 1.0)
+        end = _coerce_float(raw.get("end"), default=start + 4.0)
+        if end < start:
+            end = start + 4.0
+        impact_value = raw.get("impact", raw.get("importance", "medium"))
+        impact = IMPORTANCE_TO_IMPACT.get(str(impact_value).lower(), "medium")
+        cues.append(
+            {
+                "id": str(raw.get("id") or f"cue-{index + 1}"),
+                "start": round(start, 1),
+                "end": round(end, 1),
+                "text": text,
+                "evidenceRefs": raw.get("evidenceRefs") if isinstance(raw.get("evidenceRefs"), list) else [f"qwen-{index + 1}"],
+                "confidence": _coerce_float(raw.get("confidence"), default=0.85),
+                "needsReview": bool(raw.get("needsReview", False)),
+                "notes": str(raw.get("notes") or "Generated by chunked media analysis."),
+                "impact": impact,
+                "qaWarnings": raw.get("qaWarnings") if isinstance(raw.get("qaWarnings"), list) else [],
+                "status": raw.get("status") if raw.get("status") in {"needs_review", "accepted", "rejected", "edited"} else "accepted",
+                "rememberable": bool(raw.get("rememberable", False)),
+            }
+        )
+    return cues
+
+
+def build_fallback_video_cues(snapshot, media) -> list[dict]:
+    """Deterministic, video-focused descriptions when Qwen is unavailable.
+
+    This intentionally describes the video (title, platform, captions) and never
+    the surrounding page chrome.
+    """
+    title = (media.label if media else (snapshot.title if snapshot else "this video")) or "this video"
+    platform = (media.platform if media else (snapshot.platform if snapshot else "generic"))
+    live_caption = next((t for t in (snapshot.liveCaptionText if snapshot else []) if t), "")
+    transcript = next((t for t in (snapshot.transcriptText if snapshot else []) if t), "")
+
+    statements: list[str] = [f"Now playing: {title}."]
+    if platform and platform != "generic":
+        statements[0] = f"Now playing on {platform}: {title}."
+    if live_caption:
+        statements.append(f"On screen it reads: {_trim(live_caption)}.")
+    elif transcript:
+        statements.append(f"The video says: {_trim(transcript)}.")
+    else:
+        statements.append("Press the describe shortcut at any moment to hear what is on screen.")
+
+    cues: list[dict] = []
+    for index, text in enumerate(statements):
+        start = index * 6.0 + 1.0
+        cues.append(
+            {
+                "id": f"cue-{index + 1}",
+                "start": round(start, 1),
+                "end": round(start + 4.0, 1),
+                "text": text,
+                "evidenceRefs": [f"snapshot-{index + 1}"],
+                "confidence": 0.6,
+                "needsReview": False,
+                "notes": "Deterministic video-focused fallback (Qwen unavailable).",
+                "impact": "high" if index == 0 else "medium",
+                "qaWarnings": [],
+                "status": "accepted",
+                "rememberable": False,
+            }
+        )
+    return cues
+
+
+def _coerce_float(value, *, default: float) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result >= 0 else default
+
+
+def _trim(value: str, limit: int = 140) -> str:
+    compact = " ".join(str(value).split())
+    return compact if len(compact) <= limit else f"{compact[: limit - 3].strip()}..."
 
 
 def render_webvtt(cues: list[dict]) -> str:

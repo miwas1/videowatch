@@ -8,6 +8,14 @@
     "default_title": "DescribeOps",
     "default_popup": "popup.html"
   },
+  "commands": {
+    "describe-current-state": {
+      "suggested_key": {
+        "default": "Alt+Shift+D"
+      },
+      "description": "Describe the current video moment"
+    }
+  },
   "side_panel": {
     "default_path": "sidepanel.html"
   },
@@ -23,7 +31,7 @@
       "all_frames": false
     }
   ],
-  "permissions": ["activeTab", "nativeMessaging", "sidePanel", "scripting", "storage"],
+  "permissions": ["activeTab", "nativeMessaging", "offscreen", "sidePanel", "scripting", "storage", "tabCapture"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "optional_host_permissions": ["file:///*"],
   "content_security_policy": {

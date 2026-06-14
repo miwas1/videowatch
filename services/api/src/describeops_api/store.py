@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from .schemas import JobRecord, MemoryPreference
+from .schemas import AnalysisStage, JobProgress, JobRecord, MemoryPreference
 
 
 class JobStore:
@@ -22,6 +22,31 @@ class JobStore:
         job = self.require(job_id)
         job.status = status  # type: ignore[assignment]
         job.updatedAt = datetime.now(timezone.utc)
+        return job
+
+    def update_progress(
+        self,
+        job_id: str,
+        *,
+        stage: AnalysisStage,
+        message: str,
+        percent: int,
+        current_chunk: int | None = None,
+        total_chunks: int | None = None,
+        partial_cue_count: int | None = None,
+    ) -> JobRecord:
+        job = self.require(job_id)
+        now = datetime.now(timezone.utc)
+        job.progress = JobProgress(
+            stage=stage,
+            message=message,
+            percent=max(0, min(100, percent)),
+            currentChunk=job.progress.currentChunk if current_chunk is None else current_chunk,
+            totalChunks=job.progress.totalChunks if total_chunks is None else total_chunks,
+            partialCueCount=job.progress.partialCueCount if partial_cue_count is None else partial_cue_count,
+            updatedAt=now,
+        )
+        job.updatedAt = now
         return job
 
     def add_asset(self, job_id: str, asset: dict[str, Any]) -> JobRecord:

@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 function Popup() {
-  const [status, setStatus] = useState("Ready to scan the active page.");
+  const [status, setStatus] = useState("Open the side panel to detect the current video.");
 
   async function openPanel() {
     setStatus("Opening DescribeOps side panel.");
@@ -16,9 +16,9 @@ function Popup() {
   return (
     <main className="popup" aria-labelledby="popup-title">
       <h1 id="popup-title" className="title">DescribeOps</h1>
-      <p className="muted">Qwen-powered accessibility checks for the current page.</p>
+      <p className="muted">Audio descriptions for videos already playing in your browser.</p>
       <button type="button" onClick={openPanel} aria-label="Open DescribeOps side panel">
-        Open side panel
+        Open video assistant
       </button>
       <div className="status" role="status" aria-live="polite">{status}</div>
     </main>
