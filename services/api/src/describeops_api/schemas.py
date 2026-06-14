@@ -68,7 +68,7 @@ class PageAccessibilitySnapshot(ApiModel):
 
 MediaSourceKind = Literal["direct_url", "uploaded_asset", "tab_capture", "embedded_player", "page_snapshot"]
 AnalysisStage = Literal[
-    "queued",
+    "created",
     "resolving_media",
     "preparing_media",
     "sampling_frames",
@@ -100,8 +100,8 @@ class MediaAnalysisRequest(ApiModel):
 
 
 class JobProgress(ApiModel):
-    stage: AnalysisStage = "queued"
-    message: str = "Queued for analysis."
+    stage: AnalysisStage = "created"
+    message: str = "Ready for direct analysis."
     percent: int = Field(default=0, ge=0, le=100)
     currentChunk: int = 0
     totalChunks: int = 0
@@ -186,7 +186,7 @@ class JobRecord(ApiModel):
     id: str
     source: str
     mode: Literal["standard", "low_bandwidth"] = "standard"
-    status: Literal["queued", "running", "needs_review", "complete", "failed"] = "queued"
+    status: Literal["created", "analyzing", "needs_review", "complete", "failed"] = "created"
     traceId: str
     createdAt: datetime
     updatedAt: datetime

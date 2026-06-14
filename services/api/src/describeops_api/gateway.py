@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 import time
 from enum import StrEnum
 from typing import Any
@@ -10,7 +10,12 @@ import httpx
 from pydantic import BaseModel
 
 from .config import load_root_env
-from .schemas import QwenChunkAnalysisResponse, QwenTtsRequest, QwenTtsResult, QwenVisualChunkRequest
+from .schemas import (
+    QwenChunkAnalysisResponse,
+    QwenTtsRequest,
+    QwenTtsResult,
+    QwenVisualChunkRequest,
+)
 
 
 class ModelPurpose(StrEnum):
@@ -43,6 +48,9 @@ FRAME_LIST_SYSTEM = (
     "Do not mention page chrome, controls, comments, recommendations, or browser UI. "
     "Do not claim to hear audio. Keep the result speakable and concise."
 )
+
+MIN_QWEN_SEQUENCE_IMAGES = 4
+MAX_QWEN_SEQUENCE_IMAGES = 8000
 
 
 class TokenUsage(BaseModel):
@@ -103,17 +111,24 @@ class QwenGateway:
     def from_env(cls, client: httpx.Client | None = None) -> "QwenGateway":
         load_root_env()
         text_model = os.getenv("QWEN_TEXT_MODEL", "qwen-max-latest")
-        multimodal_model = os.getenv("QWEN_MULTIMODAL_MODEL", "qwen-vl-max-latest")
+        multimodal_model = os.getenv("QWEN_MULTIMODAL_MODEL", "qwen3.6-flash")
         qa_model = os.getenv("QWEN_QA_MODEL", text_model)
         return cls(
             api_key=os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"),
-            base_url=os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            base_url=os.getenv(
+                "DASHSCOPE_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
             models={
                 ModelPurpose.TEXT_REASONING: text_model,
                 ModelPurpose.MULTIMODAL_FRAME_ANALYSIS: multimodal_model,
-                ModelPurpose.OCR_ASSISTANCE: os.getenv("QWEN_OCR_MODEL", multimodal_model),
+                ModelPurpose.OCR_ASSISTANCE: os.getenv(
+                    "QWEN_OCR_MODEL", multimodal_model
+                ),
                 ModelPurpose.QA_SCORING: qa_model,
-                ModelPurpose.SUMMARIZATION: os.getenv("QWEN_SUMMARY_MODEL", "qwen-plus-latest"),
+                ModelPurpose.SUMMARIZATION: os.getenv(
+                    "QWEN_SUMMARY_MODEL", "qwen-plus-latest"
+                ),
             },
             client=client,
             timeout_seconds=float(os.getenv("QWEN_TIMEOUT_SECONDS", "30")),
@@ -166,8 +181,11 @@ class QwenGateway:
         result = self.chat(
             purpose=ModelPurpose.TEXT_REASONING,
             messages=[
-                {"role": "system", "content": "Return a short readiness acknowledgement."},
-                {"role": "user", "content": "health_check"}
+                {
+                    "role": "system",
+                    "content": "Return a short readiness acknowledgement.",
+                },
+                {"role": "user", "content": "health_check"},
             ],
             trace_id=trace_id,
         )
@@ -178,7 +196,9 @@ class QwenGateway:
             "latencyMs": round((time.monotonic() - started) * 1000),
         }
 
-    def describe_video(self, context: dict[str, Any], *, trace_id: str) -> dict[str, Any]:
+    def describe_video(
+        self, context: dict[str, Any], *, trace_id: str
+    ) -> dict[str, Any]:
         """Ask Qwen to describe the focused video. Returns {'summary', 'cues'}."""
         result = self.chat(
             purpose=ModelPurpose.TEXT_REASONING,
@@ -190,7 +210,9 @@ class QwenGateway:
         )
         return parse_description_payload(result.content)
 
-    def analyze_visual_chunk(self, chunk: QwenVisualChunkRequest, *, trace_id: str) -> QwenChunkAnalysisResponse:
+    def analyze_visual_chunk(
+        self, chunk: QwenVisualChunkRequest, *, trace_id: str
+    ) -> QwenChunkAnalysisResponse:
         result = self.chat(
             purpose=ModelPurpose.MULTIMODAL_FRAME_ANALYSIS,
             messages=[
@@ -202,7 +224,10 @@ class QwenGateway:
                         '"chunk_summary":"..."}'
                     ),
                 },
-                {"role": "user", "content": json.dumps(chunk.model_dump(), separators=(",", ":"))},
+                {
+                    "role": "user",
+                    "content": json.dumps(chunk.model_dump(), separators=(",", ":")),
+                },
             ],
             trace_id=trace_id,
         )
@@ -215,12 +240,18 @@ class QwenGateway:
         chunk_id: str,
         start: float,
         end: float,
-        frames: list[str],
+        frames: list[str] | str,
         prompt: str,
         fps: float,
         trace_id: str,
     ) -> QwenResult:
         """Analyze sampled frames using Qwen's frame-list video content shape."""
+        if isinstance(frames, list) and not (
+            MIN_QWEN_SEQUENCE_IMAGES <= len(frames) <= MAX_QWEN_SEQUENCE_IMAGES
+        ):
+            raise ValueError(
+                "Qwen video frame-list input requires 4 to 8000 sequence images"
+            )
         content: list[dict[str, Any]] = [
             {"type": "video", "video": frames, "fps": fps},
             {
@@ -240,7 +271,9 @@ class QwenGateway:
             trace_id=trace_id,
         )
 
-    def synthesize_tts(self, request: QwenTtsRequest, *, trace_id: str) -> QwenTtsResult:
+    def synthesize_tts(
+        self, request: QwenTtsRequest, *, trace_id: str
+    ) -> QwenTtsResult:
         if not self.api_key:
             raise QwenConfigError("QWEN_API_KEY is required for Qwen TTS calls")
 
@@ -270,7 +303,9 @@ class QwenGateway:
             audioBytes=response.content,
         )
 
-    def _post_with_retry(self, *, payload: dict[str, Any], trace_id: str) -> httpx.Response:
+    def _post_with_retry(
+        self, *, payload: dict[str, Any], trace_id: str
+    ) -> httpx.Response:
         last_response: httpx.Response | None = None
         for attempt in range(self.max_retries + 1):
             response = self.client.post(
@@ -287,4 +322,5 @@ class QwenGateway:
             last_response = response
             if attempt < self.max_retries:
                 time.sleep(0.05 * (attempt + 1))
+        return last_response or response
         return last_response or response

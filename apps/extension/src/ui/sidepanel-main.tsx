@@ -84,7 +84,8 @@ function SidePanel() {
     try {
       const response = await chrome.runtime.sendMessage({ name: "PAGE_SCAN_REQUESTED" });
       if (!response?.payload) {
-        throw new Error(response?.message ?? "No page snapshot returned.");
+        const diagnostics = response?.diagnostics ? ` ${response.diagnostics}` : "";
+        throw new Error(`${response?.message ?? "No page snapshot returned."}${diagnostics}`);
       }
       const nextSnapshot = response.payload as PageAccessibilitySnapshot;
       setSnapshot(nextSnapshot);
@@ -117,8 +118,8 @@ function SidePanel() {
     setBusy(true);
     setStatus("Watching the video and writing descriptions...");
     setProgress({
-      stage: "queued",
-      message: "Preparing analysis.",
+      stage: "created",
+      message: "Preparing direct analysis.",
       percent: 3,
       currentChunk: 0,
       totalChunks: 0,
@@ -170,18 +171,12 @@ function SidePanel() {
     });
     setProgress(created.progress ?? null);
 
-    const stopPolling = startProgressPolling(created.id);
-    try {
-      await apiFetch<BackendJobRecord>(`/v1/jobs/${encodeURIComponent(created.id)}/analyze`, { method: "POST" });
-    } finally {
-      stopPolling();
+    const analyzed = await apiFetch<BackendJobRecord>(`/v1/jobs/${encodeURIComponent(created.id)}/analyze`, { method: "POST" });
+    if (analyzed.progress) {
+      setProgress(analyzed.progress);
+      setStatus(analyzed.progress.message);
     }
 
-    const latest = await apiFetch<BackendJobRecord>(`/v1/jobs/${encodeURIComponent(created.id)}`, { method: "GET" });
-    if (latest.progress) {
-      setProgress(latest.progress);
-      setStatus(latest.progress.message);
-    }
     const artifacts = await apiFetch<BackendArtifactsResponse>(`/v1/jobs/${encodeURIComponent(created.id)}/artifacts`, {
       method: "GET"
     });
@@ -194,34 +189,6 @@ function SidePanel() {
       throw new Error("Backend returned no playback cues.");
     }
     return backendCues.map((cue) => ({ ...cue, status: "accepted" as const }));
-  }
-
-  function startProgressPolling(jobId: string) {
-    let cancelled = false;
-
-    const poll = async () => {
-      if (cancelled) return;
-      try {
-        const job = await apiFetch<BackendJobRecord>(`/v1/jobs/${encodeURIComponent(jobId)}`, { method: "GET" });
-        if (job.progress) {
-          setProgress(job.progress);
-          setStatus(job.progress.message);
-        }
-        if (job.status === "failed" || job.status === "complete") {
-          return;
-        }
-      } catch {
-        // The analyze request is still the source of truth; polling is only for UX.
-      }
-      if (!cancelled) {
-        window.setTimeout(poll, 600);
-      }
-    };
-
-    window.setTimeout(poll, 250);
-    return () => {
-      cancelled = true;
-    };
   }
 
   async function apiFetch<T>(path: string, init: RequestInit): Promise<T> {
@@ -298,7 +265,7 @@ function SidePanel() {
 }
 
 function ProgressRail({ progress, cueCount, chunkCount }: { progress: JobProgress | null; cueCount: number; chunkCount: number }) {
-  const activeStage = progress?.stage ?? "queued";
+  const activeStage = progress?.stage ?? "created";
   const percent = progress?.percent ?? 0;
   const stages: Array<{ id: JobProgress["stage"]; label: string }> = [
     { id: "resolving_media", label: "Media" },
@@ -319,7 +286,7 @@ function ProgressRail({ progress, cueCount, chunkCount }: { progress: JobProgres
         {stages.map((stage, index) => (
           <li
             key={stage.id}
-            data-state={activeStage === "failed" ? "failed" : index <= doneIndex ? "done" : index === activeIndex ? "running" : "waiting"}
+            data-state={activeStage === "failed" ? "failed" : index <= doneIndex ? "done" : index === activeIndex ? "active" : "waiting"}
           >
             <span />
             {stage.label}

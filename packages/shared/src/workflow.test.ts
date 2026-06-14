@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   ExportArtifactSchema,
   MemoryPreferenceSchema,
-  OfflineQueueItemSchema,
   PlaybackPackageSchema,
   ReviewCueSchema,
   retrieveMemoryForContext
@@ -68,7 +67,7 @@ describe("phase 7 and 8 workflow contracts", () => {
     expect(retrieved.map((memory) => memory.id)).toEqual(["mem_voice"]);
   });
 
-  it("validates review cues, playback packages, exports, and offline queue items", () => {
+  it("validates review cues, playback packages, and exports", () => {
     const reviewCue = ReviewCueSchema.parse({
       id: "cue-1",
       start: 2.5,
@@ -104,18 +103,7 @@ describe("phase 7 and 8 workflow contracts", () => {
       offlineAvailable: true
     });
 
-    const queueItem = OfflineQueueItemSchema.parse({
-      id: "offline-1",
-      jobId: "job-1",
-      action: "sync_review",
-      status: "queued",
-      createdAt: "2026-06-13T12:00:00.000Z",
-      retryCount: 0,
-      payloadSummary: "Cue cue-1 edited offline"
-    });
-
     expect(playbackPackage.cues[0].rememberable).toBe(true);
     expect(artifact.kind).toBe("webvtt");
-    expect(queueItem.action).toBe("sync_review");
   });
 });

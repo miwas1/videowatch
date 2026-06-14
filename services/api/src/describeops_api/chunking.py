@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 from .schemas import ChunkSemanticMemory, QwenTimelineEvent, SectionSemanticMemory, VideoChunk
@@ -98,34 +98,6 @@ def retrieve_question_context(
         "section_summaries": [section.summary for section in sections if section.start <= current_time],
         "global_video_summary": " ".join(section.summary for section in sections[:3]),
     }
-
-
-@dataclass
-class ChunkRetryQueue:
-    queued: list[str] = field(default_factory=list)
-    retryable: set[str] = field(default_factory=set)
-    partialTimelineUsable: bool = True
-    attempts: dict[str, int] = field(default_factory=dict)
-
-    def enqueue(self, chunk_id: str) -> None:
-        if chunk_id not in self.queued:
-            self.queued.append(chunk_id)
-
-    def mark_rate_limited(self, chunk_id: str) -> int:
-        self.enqueue(chunk_id)
-        self.retryable.add(chunk_id)
-        self.attempts[chunk_id] = self.attempts.get(chunk_id, 0) + 1
-        return min(60, 2 ** self.attempts[chunk_id])
-
-    def mark_timeout(self, chunk_id: str) -> dict:
-        self.enqueue(chunk_id)
-        self.retryable.add(chunk_id)
-        return {
-            "spinner": "stopped",
-            "partialTimelineUsable": self.partialTimelineUsable,
-            "failedChunk": chunk_id,
-            "retryable": True,
-        }
 
 
 @dataclass

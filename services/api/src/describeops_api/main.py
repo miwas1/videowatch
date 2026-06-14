@@ -155,13 +155,13 @@ def create_app() -> FastAPI:
         )
         return asset
 
-    @app.post("/v1/jobs/{job_id}/analyze", status_code=status.HTTP_202_ACCEPTED)
+    @app.post("/v1/jobs/{job_id}/analyze", response_model=JobRecord, status_code=status.HTTP_200_OK)
     def analyze_job(
         job_id: str,
         _: None = Depends(require_api_token),
         jobs: JobStore = Depends(get_store),
         gateway: QwenGateway = Depends(get_gateway),
-    ) -> dict:
+    ) -> JobRecord:
         job = job_or_404(jobs, job_id)
         if not gateway.configured:
             jobs.update_status(job_id, "failed")
@@ -178,7 +178,7 @@ def create_app() -> FastAPI:
                     "message": "QWEN_API_KEY is required before starting AI analysis jobs.",
                 },
             )
-        status_value = "running"
+        status_value = "analyzing"
         LOGGER.info(
             "job.analysis_requested jobId=%s traceId=%s mode=%s qwenConfigured=%s model=%s snapshot=%s",
             job.id,
@@ -191,8 +191,8 @@ def create_app() -> FastAPI:
         jobs.update_status(job_id, status_value)
         jobs.update_progress(
             job_id,
-            stage="queued",
-            message="Analysis job accepted.",
+            stage="created",
+            message="Starting direct analysis.",
             percent=5,
         )
 
@@ -278,7 +278,7 @@ def create_app() -> FastAPI:
             qwen_payload is not None,
             [artifact["kind"] for artifact in [plan_artifact, *analysis_artifacts, *generated]],
         )
-        return {"id": job_id, "status": "complete", "traceId": job.traceId, "qwenUsed": qwen_payload_used_model(qwen_payload)}
+        return jobs.require(job_id)
 
     @app.get("/v1/jobs/{job_id}", response_model=JobRecord)
     def get_job(

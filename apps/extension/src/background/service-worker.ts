@@ -129,8 +129,9 @@ async function scanActiveTab() {
     throw new Error("No active tab is available.");
   }
 
+  assertScannableTab(tab);
   const request = createEvent("PAGE_SCAN_REQUESTED", { tabId: tab.id });
-  const response = await chrome.tabs.sendMessage(tab.id, request, { frameId: 0 });
+  const response = await sendScanRequest(tab.id, request);
   return DescribeOpsEventSchema.parse(response);
 }
 
@@ -183,6 +184,43 @@ async function activeTabId() {
     throw new Error("No active tab is available.");
   }
   return tab.id;
+}
+
+async function sendScanRequest(tabId: number, request: unknown) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, request, { frameId: 0 });
+  } catch (firstError) {
+    await injectContentScript(tabId);
+    try {
+      return await chrome.tabs.sendMessage(tabId, request, { frameId: 0 });
+    } catch (secondError) {
+      throw new Error(
+        `Content script did not answer after reinjection. First error: ${String(firstError)}. Retry error: ${String(secondError)}.`
+      );
+    }
+  }
+}
+
+async function injectContentScript(tabId: number) {
+  if (!chrome.scripting?.executeScript) {
+    throw new Error("Chrome scripting API is not available.");
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [0] },
+    files: ["content-script.js"]
+  });
+}
+
+function assertScannableTab(tab: chrome.tabs.Tab) {
+  const url = tab.url ?? "";
+  if (/^(chrome|edge|brave|vivaldi|opera|about):/i.test(url)) {
+    throw new Error("Browser internal pages cannot be scanned by extensions.");
+  }
+
+  if (url.startsWith("chrome-extension://")) {
+    throw new Error("Extension pages cannot be scanned as video tabs.");
+  }
 }
 
 async function ensureOffscreenDocument() {

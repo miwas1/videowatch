@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .gateway import QwenGateway
 from .schemas import AnalysisStage, DetectedMedia, JobRecord, MediaAnalysisRequest
@@ -21,9 +22,14 @@ DEFAULT_CHUNK_SECONDS = 30
 DEFAULT_FRAME_COUNT = 4
 DEFAULT_FRAME_WIDTH = 448
 DEFAULT_FPS = 0.5
+MIN_QWEN_SEQUENCE_IMAGES = 4
+MAX_QWEN_SEQUENCE_IMAGES = 8000
 MAX_FRAME_DATA_URL_BYTES = 9 * 1024 * 1024
+VIDEO_FILE_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
 
-ProgressCallback = Callable[[AnalysisStage, str, int, int | None, int | None, int | None], None]
+ProgressCallback = Callable[
+    [AnalysisStage, str, int, int | None, int | None, int | None], None
+]
 
 
 @dataclass(frozen=True)
@@ -233,25 +239,34 @@ def plan_live_chunks(duration: float) -> list[PlannedChunk]:
     return chunks or [PlannedChunk(index=0, start=0.0, end=max(1.0, duration))]
 
 
-def frames_for_chunk(source: dict[str, Any], request: MediaAnalysisRequest, chunk: PlannedChunk) -> list[str]:
+QwenVideoInput = list[str] | str
+
+
+def frames_for_chunk(
+    source: dict[str, Any],
+    request: MediaAnalysisRequest,
+    chunk: PlannedChunk,
+) -> QwenVideoInput | None:
     if request.frameSamples:
-        return request.frameSamples[:DEFAULT_FRAME_COUNT]
+        return normalize_frame_sequence(request.frameSamples[:configured_frame_count()])
     if source.get("sourceKind") == "page_snapshot":
-        return []
+        return None
     path = source.get("path")
     if path:
         extracted = extract_frame_data_urls(Path(path), chunk)
         if extracted:
-            return extracted
+            return normalize_frame_sequence(extracted)
     url = source.get("url")
-    return [url] if isinstance(url, str) and url else []
+    if isinstance(url, str) and is_video_file_url(url):
+        return url
+    return None
 
 
 def extract_frame_data_urls(path: Path, chunk: PlannedChunk) -> list[str]:
     if not path.exists() or not ffmpeg_available():
         return []
 
-    frame_count = int(os.getenv("QWEN_FRAME_COUNT", str(DEFAULT_FRAME_COUNT)))
+    frame_count = configured_frame_count()
     frame_width = int(os.getenv("QWEN_FRAME_WIDTH", str(DEFAULT_FRAME_WIDTH)))
     with tempfile.TemporaryDirectory(prefix="describeops-frames-") as tmp:
         frame_dir = Path(tmp)
@@ -297,7 +312,7 @@ def analyze_chunk_with_qwen(
     request: MediaAnalysisRequest,
     source: dict[str, Any],
     chunk: PlannedChunk,
-    frames: list[str],
+    frames: QwenVideoInput | None,
     trace_id: str,
 ) -> dict[str, Any]:
     prompt = chunk_prompt(request, chunk)
@@ -311,6 +326,7 @@ def analyze_chunk_with_qwen(
             "frameCount": 0,
             "importance": "medium",
         }
+    frame_count = count_video_input(frames)
 
     try:
         result = gateway.describe_frame_list(
@@ -323,16 +339,19 @@ def analyze_chunk_with_qwen(
             fps=DEFAULT_FPS,
             trace_id=trace_id,
         )
+        transport = (
+            "qwen-frame-list" if isinstance(frames, list) else "qwen-video-file"
+        )
         return {
             "chunkId": chunk_id(chunk),
             "start": chunk.start,
             "end": chunk.end,
             "analysis": clean_analysis_text(result.content),
-            "transport": "qwen-frame-list",
+            "transport": transport,
             "model": result.model,
             "latencyMs": result.latencyMs,
             "usage": result.usage.model_dump(),
-            "frameCount": len(frames),
+            "frameCount": frame_count,
             "importance": "high" if chunk.index == 0 else "medium",
         }
     except Exception as exc:  # noqa: BLE001 - partial descriptions are better UX than a dead job
@@ -343,7 +362,7 @@ def analyze_chunk_with_qwen(
             "analysis": fallback_chunk_text(request, source, chunk),
             "transport": "fallback-after-qwen-error",
             "error": f"{type(exc).__name__}: {exc}",
-            "frameCount": len(frames),
+            "frameCount": frame_count,
             "importance": "medium",
         }
 
@@ -379,18 +398,30 @@ def cue_from_chunk_result(result: dict[str, Any], *, index: int, title: str) -> 
         "end": round(cue_end, 1),
         "text": text,
         "evidenceRefs": [result.get("chunkId", f"chunk-{index + 1}")],
-        "confidence": 0.82 if result.get("transport") == "qwen-frame-list" else 0.58,
-        "needsReview": result.get("transport") != "qwen-frame-list",
+        "confidence": (
+            0.82
+            if result.get("transport") in {"qwen-frame-list", "qwen-video-file"}
+            else 0.58
+        ),
+        "needsReview": result.get("transport")
+        not in {"qwen-frame-list", "qwen-video-file"},
         "notes": f"Generated from chunked media analysis for {title}.",
         "impact": result.get("importance", "medium"),
-        "qaWarnings": [] if result.get("transport") == "qwen-frame-list" else ["Visual evidence was limited for this segment."],
+        "qaWarnings": []
+        if result.get("transport") in {"qwen-frame-list", "qwen-video-file"}
+        else ["Visual evidence was limited for this segment."],
         "status": "accepted",
         "rememberable": False,
     }
 
 
 def summarize_analysis(title: str, chunks: list[dict[str, Any]]) -> str:
-    qwen = [chunk["analysis"] for chunk in chunks if chunk.get("transport") == "qwen-frame-list" and chunk.get("analysis")]
+    qwen = [
+        chunk["analysis"]
+        for chunk in chunks
+        if chunk.get("transport") in {"qwen-frame-list", "qwen-video-file"}
+        and chunk.get("analysis")
+    ]
     if qwen:
         return f"{title}: {qwen[0]}"
     first = next((chunk.get("analysis") for chunk in chunks if chunk.get("analysis")), "")
@@ -414,6 +445,31 @@ def chunk_id(chunk: PlannedChunk) -> str:
 def safe_id(value: Any) -> str:
     raw = json.dumps(value, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def configured_frame_count() -> int:
+    return max(
+        MIN_QWEN_SEQUENCE_IMAGES,
+        int(os.getenv("QWEN_FRAME_COUNT", str(DEFAULT_FRAME_COUNT))),
+    )
+
+
+def normalize_frame_sequence(frames: list[str]) -> list[str] | None:
+    count = len(frames)
+    if MIN_QWEN_SEQUENCE_IMAGES <= count <= MAX_QWEN_SEQUENCE_IMAGES:
+        return frames
+    return None
+
+
+def count_video_input(video_input: QwenVideoInput) -> int:
+    if isinstance(video_input, list):
+        return len(video_input)
+    return 1
+
+
+def is_video_file_url(value: str) -> bool:
+    path = urlsplit(value).path.lower()
+    return any(path.endswith(extension) for extension in VIDEO_FILE_EXTENSIONS)
 
 
 def format_ts(seconds: float) -> str:

@@ -2,9 +2,7 @@ import json
 
 import httpx
 import pytest
-
 from describeops_api.chunking import (
-    ChunkRetryQueue,
     RealtimeReconnectState,
     build_chunk_memory,
     build_section_memory,
@@ -12,13 +10,21 @@ from describeops_api.chunking import (
     retrieve_question_context,
 )
 from describeops_api.gateway import ModelPurpose, QwenConfigError, QwenGateway
-from describeops_api.schemas import QwenTimelineEvent, QwenTtsRequest, QwenVisualChunkRequest
+from describeops_api.schemas import (
+    QwenTimelineEvent,
+    QwenTtsRequest,
+    QwenVisualChunkRequest,
+)
 
 
 def test_qwen_api_key_is_configured_for_ai_jobs(monkeypatch):
     monkeypatch.delenv("QWEN_API_KEY", raising=False)
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
-    gateway = QwenGateway.from_env(client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200))))
+    gateway = QwenGateway.from_env(
+        client=httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200))
+        )
+    )
 
     with pytest.raises(QwenConfigError) as error:
         gateway.chat(
@@ -53,8 +59,8 @@ def test_model_router_uses_current_qwen_defaults(monkeypatch):
     gateway = QwenGateway.from_env()
 
     assert gateway.model_for(ModelPurpose.TEXT_REASONING) == "qwen-max-latest"
-    assert gateway.model_for(ModelPurpose.MULTIMODAL_FRAME_ANALYSIS) == "qwen-vl-max-latest"
-    assert gateway.model_for(ModelPurpose.OCR_ASSISTANCE) == "qwen-vl-max-latest"
+    assert gateway.model_for(ModelPurpose.MULTIMODAL_FRAME_ANALYSIS) == "qwen3.6-flash"
+    assert gateway.model_for(ModelPurpose.OCR_ASSISTANCE) == "qwen3.6-flash"
     assert gateway.model_for(ModelPurpose.QA_SCORING) == "qwen-max-latest"
     assert gateway.model_for(ModelPurpose.SUMMARIZATION) == "qwen-plus-latest"
 
@@ -70,7 +76,11 @@ def test_openai_compatible_adapter_tracks_usage_and_trace(monkeypatch):
             200,
             json={
                 "choices": [{"message": {"content": "ok"}}],
-                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
                 "model": "qwen-plus",
             },
         )
@@ -137,7 +147,9 @@ def test_backend_can_make_basic_qwen_health_call(monkeypatch):
             },
         )
 
-    gateway = QwenGateway.from_env(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    gateway = QwenGateway.from_env(
+        client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
 
     health = gateway.health_check(trace_id="trc_health")
 
@@ -170,7 +182,9 @@ def test_sends_sampled_frames_and_transcript_chunk_to_qwen_json_contract(monkeyp
             },
         )
 
-    gateway = QwenGateway.from_env(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    gateway = QwenGateway.from_env(
+        client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
     response = gateway.analyze_visual_chunk(
         QwenVisualChunkRequest(
             video_id="demo-001",
@@ -178,7 +192,9 @@ def test_sends_sampled_frames_and_transcript_chunk_to_qwen_json_contract(monkeyp
             start=0,
             end=30,
             frames=["frame_000.jpg", "frame_005.jpg", "frame_010.jpg"],
-            transcript=[{"start": 2.1, "end": 5.4, "text": "Today we are making pancakes."}],
+            transcript=[
+                {"start": 2.1, "end": 5.4, "text": "Today we are making pancakes."}
+            ],
             ocr=[{"time": 12.0, "text": "Add two cups of flour"}],
         ),
         trace_id="trc_chunk",
@@ -203,7 +219,9 @@ def test_raw_unstructured_qwen_text_cannot_enter_playback_engine(monkeypatch):
             },
         )
 
-    gateway = QwenGateway.from_env(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    gateway = QwenGateway.from_env(
+        client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
 
     with pytest.raises(ValueError):
         gateway.analyze_visual_chunk(
@@ -218,16 +236,50 @@ def test_raw_unstructured_qwen_text_cannot_enter_playback_engine(monkeypatch):
         )
 
 
+def test_frame_list_video_input_requires_at_least_four_images(monkeypatch):
+    monkeypatch.setenv("QWEN_API_KEY", "sk-test")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    gateway = QwenGateway.from_env(
+        client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+
+    with pytest.raises(ValueError, match="4 to 8000"):
+        gateway.describe_frame_list(
+            video_id="demo",
+            chunk_id="chunk-0001",
+            start=0,
+            end=6,
+            frames=["frame_001.jpg"],
+            prompt="Describe this clip.",
+            fps=0.5,
+            trace_id="trc_bad_frame_count",
+        )
+
+    assert calls == 0
+
+
 def test_qwen_tts_creates_playable_audio_contract(monkeypatch):
     monkeypatch.setenv("QWEN_API_KEY", "sk-test")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "audio/mpeg"}, content=b"mp3-bytes")
+        return httpx.Response(
+            200, headers={"content-type": "audio/mpeg"}, content=b"mp3-bytes"
+        )
 
-    gateway = QwenGateway.from_env(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    gateway = QwenGateway.from_env(
+        client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
 
     audio = gateway.synthesize_tts(
-        QwenTtsRequest(text="She pours milk into the flour.", voice="default", speed=1.05),
+        QwenTtsRequest(
+            text="She pours milk into the flour.", voice="default", speed=1.05
+        ),
         trace_id="trc_tts",
     )
 
@@ -246,28 +298,6 @@ def test_realtime_session_reconnects_cleanly():
     assert message == "Reconnecting accessibility assistant..."
     assert state.reconnectAttempts == 1
     assert state.status == "connected"
-
-
-def test_qwen_rate_limit_queue_does_not_duplicate_chunks():
-    queue = ChunkRetryQueue()
-
-    first_backoff = queue.mark_rate_limited("chunk-0001")
-    second_backoff = queue.mark_rate_limited("chunk-0001")
-
-    assert queue.queued == ["chunk-0001"]
-    assert "chunk-0001" in queue.retryable
-    assert second_backoff > first_backoff
-
-
-def test_qwen_timeout_keeps_partial_timeline_usable():
-    queue = ChunkRetryQueue()
-
-    state = queue.mark_timeout("chunk-0007")
-
-    assert state["spinner"] == "stopped"
-    assert state["partialTimelineUsable"] is True
-    assert state["retryable"] is True
-    assert queue.queued == ["chunk-0007"]
 
 
 def test_long_video_uses_chunking_and_timeline_memory():
@@ -302,6 +332,8 @@ def test_long_video_uses_chunking_and_timeline_memory():
         question="What does DATABASE_URL mean?",
     )
 
-    assert context["nearby_chunk_summaries"] == ["The presenter explains database configuration."]
+    assert context["nearby_chunk_summaries"] == [
+        "The presenter explains database configuration."
+    ]
     assert context["matching_ocr"] == ["DATABASE_URL"]
     assert "database configuration" in context["global_video_summary"]

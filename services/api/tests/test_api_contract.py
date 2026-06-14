@@ -61,8 +61,9 @@ def test_create_analyze_and_fetch_job(monkeypatch):
     job_id = created.json()["id"]
 
     analyzed = client.post(f"/v1/jobs/{job_id}/analyze", headers=authed_headers())
-    assert analyzed.status_code == 202
-    assert analyzed.json()["status"] in {"running", "needs_review", "complete"}
+    assert analyzed.status_code == 200
+    assert analyzed.json()["status"] == "complete"
+    assert analyzed.json()["progress"]["stage"] == "complete"
 
     fetched = client.get(f"/v1/jobs/{job_id}", headers=authed_headers())
     assert fetched.status_code == 200

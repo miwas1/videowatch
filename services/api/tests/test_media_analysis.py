@@ -66,9 +66,58 @@ def test_media_analysis_chunks_any_direct_media_into_playback_cues(monkeypatch):
     )
 
     assert len(gateway.calls) == 3
+    assert all(isinstance(call["frames"], str) for call in gateway.calls)
     assert result.qwen_payload is not None
     assert len(result.qwen_payload["cues"]) == 3
     assert result.artifacts[0]["kind"] == "media-analysis-summary"
     assert result.artifacts[1]["kind"] == "chunk-timeline"
     assert "resolving_media" in stages
     assert stages[-1] == "complete"
+
+
+def test_media_analysis_does_not_send_page_url_as_one_frame_sequence(monkeypatch):
+    monkeypatch.setenv("QWEN_FIRST_CHUNK_SECONDS", "6")
+    monkeypatch.setenv("QWEN_CHUNK_SECONDS", "30")
+    gateway = FakeGateway()
+    job = JobRecord.create(
+        JobCreateRequest(
+            source="browser",
+            mode="low_bandwidth",
+            snapshot={
+                "url": "https://www.youtube.com/watch?v=C08zzUwcckI",
+                "title": "Tricia becomes Peter's Mom",
+                "platform": "youtube",
+                "media": [
+                    {
+                        "id": "video-0",
+                        "kind": "embedded-player",
+                        "label": "Tricia becomes Peter's Mom",
+                        "duration": 40,
+                        "source": "https://www.youtube.com/watch?v=C08zzUwcckI",
+                        "platform": "youtube",
+                        "isFocused": True,
+                    }
+                ],
+            },
+            analysisRequest={
+                "mediaId": "video-0",
+                "sourceKind": "embedded_player",
+                "videoUrl": "https://www.youtube.com/watch?v=C08zzUwcckI",
+                "pageUrl": "https://www.youtube.com/watch?v=C08zzUwcckI",
+                "title": "Tricia becomes Peter's Mom",
+                "duration": 40,
+                "platform": "youtube",
+                "detailLevel": "balanced",
+            },
+        )
+    )
+
+    result = analyze_media_job(job, gateway=gateway)  # type: ignore[arg-type]
+
+    assert gateway.calls == []
+    assert result.qwen_payload is not None
+    assert len(result.qwen_payload["cues"]) == 3
+    assert all(
+        chunk["transport"] == "snapshot-fallback"
+        for chunk in result.qwen_payload["chunks"]
+    )

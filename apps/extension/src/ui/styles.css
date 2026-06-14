@@ -204,11 +204,11 @@ select {
   background: #fff;
 }
 
-.progress-steps li[data-state="running"] {
+.progress-steps li[data-state="active"] {
   color: var(--ink);
 }
 
-.progress-steps li[data-state="running"] span {
+.progress-steps li[data-state="active"] span {
   border-color: var(--amber);
   background: var(--amber);
   box-shadow: 0 0 0 4px rgba(185, 119, 18, 0.16);

@@ -29,7 +29,7 @@ export const MediaSourceKinds = [
 ] as const;
 
 export const AnalysisStages = [
-  "queued",
+  "created",
   "resolving_media",
   "preparing_media",
   "sampling_frames",
@@ -223,7 +223,7 @@ export const BackendJobRecordSchema = z.object({
   id: z.string().min(1),
   source: z.string(),
   mode: z.enum(["standard", "low_bandwidth"]),
-  status: z.enum(["queued", "running", "needs_review", "complete", "failed"]),
+  status: z.enum(["created", "analyzing", "needs_review", "complete", "failed"]),
   traceId: z.string().min(1),
   snapshot: PageAccessibilitySnapshotSchema.optional().nullable(),
   analysisRequest: MediaAnalysisRequestSchema.optional().nullable(),
@@ -239,17 +239,6 @@ export const ExportArtifactSchema = z.object({
   sizeBytes: z.number().int().nonnegative(),
   createdAt: z.string().datetime(),
   offlineAvailable: z.boolean()
-});
-
-export const OfflineQueueItemSchema = z.object({
-  id: z.string().min(1),
-  jobId: z.string().min(1),
-  action: z.enum(["create_job", "sync_review", "render_tts", "publish_artifacts"]),
-  status: z.enum(["queued", "syncing", "failed", "complete"]),
-  createdAt: z.string().datetime(),
-  retryCount: z.number().int().nonnegative(),
-  payloadSummary: z.string().min(1),
-  lastError: z.string().optional()
 });
 
 export const EvidenceBundleSchema = z.object({
@@ -294,7 +283,7 @@ export const DescribeOpsEventSchema = z.discriminatedUnion("name", [
     payload: z.object({
       jobId: z.string().min(1),
       mediaId: z.string().min(1),
-      status: z.enum(["queued", "running", "needs_review", "complete", "failed"])
+      status: z.enum(["created", "analyzing", "needs_review", "complete", "failed"])
     })
   }),
   BaseEventSchema.extend({
@@ -335,7 +324,6 @@ export type PlaybackPackage = z.infer<typeof PlaybackPackageSchema>;
 export type ChunkTimelineItem = z.infer<typeof ChunkTimelineItemSchema>;
 export type BackendJobRecord = z.infer<typeof BackendJobRecordSchema>;
 export type ExportArtifact = z.infer<typeof ExportArtifactSchema>;
-export type OfflineQueueItem = z.infer<typeof OfflineQueueItemSchema>;
 export type EvidenceBundle = z.infer<typeof EvidenceBundleSchema>;
 export type DescribeOpsEvent = z.infer<typeof DescribeOpsEventSchema>;
 
