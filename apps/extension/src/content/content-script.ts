@@ -55,6 +55,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.name === "SEEK_VIDEO_REQUESTED") {
+    const media = findMediaElement();
+    if (media) {
+      media.currentTime = Number(message.seconds ?? 0);
+    }
+    sendResponse({ ok: true, payload: { seeked: true } });
+    return true;
+  }
+
   return false;
 });
 

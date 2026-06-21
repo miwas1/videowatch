@@ -48,12 +48,18 @@ function SidePanel() {
   const [attached, setAttached] = useState(false);
   const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
   const [showConnectionSettings, setShowConnectionSettings] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
   const [capturedRanges, setCapturedRanges] = useState<CapturedRange[]>([]);
   const [autoCapturing, setAutoCapturing] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptResponse | null>(null);
   const [progressText, setProgressText] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const autoCaptureRef = useRef(false);
+  const autoStartedRef = useRef(false);
+  const chunkIndexRef = useRef(0);
+  const selectedMediaIdRef = useRef("");
+  const sessionRef = useRef<SessionResponse | null>(null);
+  const snapshotRef = useRef<PageAccessibilitySnapshot | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const api = useMemo(() => (settings ? new DescribeOpsApi(settings) : null), [settings]);
@@ -77,6 +83,77 @@ function SidePanel() {
   useEffect(() => {
     autoCaptureRef.current = autoCapturing;
   }, [autoCapturing]);
+
+  useEffect(() => {
+    chunkIndexRef.current = chunkIndex;
+  }, [chunkIndex]);
+
+  useEffect(() => {
+    selectedMediaIdRef.current = selectedMediaId;
+  }, [selectedMediaId]);
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    snapshotRef.current = snapshot;
+  }, [snapshot]);
+
+  useEffect(() => {
+    if (!settings?.autoCapture || autoStartedRef.current || autoCapturing || isBusy(stage) || !api || !snapshot || !focusedMedia) {
+      return;
+    }
+    autoStartedRef.current = true;
+    setStatus("Auto mode enabled. Starting capture.");
+    void startAutoCapture();
+  }, [api, autoCapturing, focusedMedia, settings?.autoCapture, snapshot, stage]);
+
+  // Task 4: Per-agent progress via SSE polling
+  useEffect(() => {
+    if (stage !== "upload" || !session || !settings) return;
+    let cancelled = false;
+    let lastEventId = 0;
+
+    async function pollEvents() {
+      while (!cancelled) {
+        try {
+          const url = `${settings!.apiBaseUrl}/api/v1/sessions/${session!.id}/events?after=${lastEventId}`;
+          const headers: Record<string, string> = { Accept: "text/event-stream" };
+          if (settings!.apiToken) headers["Authorization"] = `Bearer ${settings!.apiToken}`;
+          const res = await fetch(url, { headers });
+          if (!res.ok) break;
+          const text = await res.text();
+          const lines = text.split("\n");
+          for (const line of lines) {
+            if (cancelled) break;
+            if (line.startsWith("data:")) {
+              const data = line.slice(5).trim();
+              try {
+                const event = JSON.parse(data) as { id?: number; type?: string; message?: string };
+                if (event.id && event.id > lastEventId) lastEventId = event.id;
+                if (event.type) {
+                  const label = sseEventLabel(event.type, event.message);
+                  setProgressText(label);
+                }
+              } catch {
+                // Not JSON, treat as plain text event
+                if (data) setProgressText(data);
+              }
+            }
+          }
+        } catch {
+          // Network error, stop polling
+          break;
+        }
+        if (cancelled) break;
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
+
+    pollEvents();
+    return () => { cancelled = true; };
+  }, [stage, session, settings]);
 
   async function checkHealth(nextSettings = settings) {
     if (!nextSettings) return;
@@ -129,12 +206,18 @@ function SidePanel() {
     }
   }
 
-  async function createOrReuseSession() {
-    if (!api || !snapshot || !focusedMedia) return null;
-    if (session) return session;
+  function mediaFromSnapshot(nextSnapshot: PageAccessibilitySnapshot | null): DetectedMedia | null {
+    if (!nextSnapshot) return null;
+    return nextSnapshot.media.find((item) => item.id === selectedMediaIdRef.current) ?? nextSnapshot.media.find((item) => item.isFocused) ?? nextSnapshot.media[0] ?? null;
+  }
+
+  async function createOrReuseSession(nextSnapshot = snapshotRef.current, media = mediaFromSnapshot(nextSnapshot)) {
+    if (!api || !nextSnapshot || !media) return null;
+    if (sessionRef.current) return sessionRef.current;
     setStage("session");
     setStatus("Creating a DescribeOps backend session.");
-    const created = await api.createSession(snapshot, focusedMedia.id);
+    const created = await api.createSession(nextSnapshot, media.id);
+    sessionRef.current = created;
     setSession(created);
     setStatus("Session created. Ready to capture.");
     return created;
@@ -153,28 +236,35 @@ function SidePanel() {
     }
   }
 
-  async function captureAndAnalyze() {
-    if (!api || !snapshot || !focusedMedia) {
+  function seekVideo(seconds: number) {
+    chrome.runtime.sendMessage({ name: "SEEK_VIDEO_REQUESTED", seconds });
+  }
+
+  async function captureAndAnalyze(overrideStart?: number, overrideEnd?: number, overrideChunkIndex?: number) {
+    const activeSnapshot = snapshotRef.current;
+    const activeMedia = mediaFromSnapshot(activeSnapshot);
+    if (!api || !activeSnapshot || !activeMedia) {
       await scanActiveTab();
-      return;
+      return false;
     }
 
     try {
       setError("");
-      const activeSession = await createOrReuseSession();
-      if (!activeSession) return;
+      const activeSession = await createOrReuseSession(activeSnapshot, activeMedia);
+      if (!activeSession) return false;
 
       setStage("capture");
       startTimer();
-      const start = Math.max(0, Math.floor(focusedMedia.currentTime ?? 0));
-      const end = start + (settings?.chunkSeconds ?? 30);
+      const start = overrideStart ?? Math.max(0, Math.floor(activeMedia.currentTime ?? 0));
+      const end = overrideEnd ?? (start + (settings?.chunkSeconds ?? 30));
+      const activeChunkIndex = overrideChunkIndex ?? chunkIndexRef.current;
       const frameCount = settings?.framesPerChunk ?? 4;
       setStatus(`Capturing ${frameCount} frames from ${formatClock(start)} to ${formatClock(end)}.`);
       setProgressText("Seeking video and capturing frames...");
 
       const frameResponse = await chrome.runtime.sendMessage({
         name: "CAPTURE_MULTI_FRAMES_REQUESTED",
-        mediaId: focusedMedia.id,
+        mediaId: activeMedia.id,
         startSeconds: start,
         endSeconds: end,
         frameCount
@@ -183,7 +273,7 @@ function SidePanel() {
       if (!frameResponse.ok) {
         fail("Frame capture failed.", frameResponse.message);
         stopTimer();
-        return;
+        return false;
       }
 
       const transcriptSlice = getTranscriptForRange(start, end);
@@ -193,17 +283,18 @@ function SidePanel() {
       setStatus(`Uploading ${frameResponse.payload.length} frames. Agents are analyzing.`);
       const uploaded = await api.uploadChunk({
         sessionId: activeSession.id,
-        chunkIndex,
+        chunkIndex: activeChunkIndex,
         startSeconds: start,
         endSeconds: end,
-        transcriptText: transcriptSlice || transcriptFromSnapshot(snapshot),
-        captureNotes: captureNotes(snapshot, focusedMedia, frameResponse.payload[0]),
+        transcriptText: transcriptSlice || transcriptFromSnapshot(activeSnapshot),
+        captureNotes: captureNotes(activeSnapshot, activeMedia, frameResponse.payload[0]),
         frames: frameResponse.payload
       });
 
-      const newRange: CapturedRange = { start, end, chunkIndex };
+      const newRange: CapturedRange = { start, end, chunkIndex: activeChunkIndex };
       setCapturedRanges((prev) => [...prev, newRange]);
-      setChunkIndex((value) => value + 1);
+      chunkIndexRef.current = Math.max(chunkIndexRef.current, activeChunkIndex + 1);
+      setChunkIndex(chunkIndexRef.current);
       stopTimer();
       setProgressText("");
       setStatus(uploaded.status === "ready" ? "Chunk analyzed. Reading document updated." : `Chunk accepted (${uploaded.status}). Refreshing...`);
@@ -211,10 +302,12 @@ function SidePanel() {
       const nextDocument = await api.getDocument(activeSession.id);
       setDocumentPayload(nextDocument);
       setStage("review");
+      return true;
     } catch (caught) {
       stopTimer();
       setProgressText("");
       fail("Capture and analysis failed.", String(caught));
+      return false;
     }
   }
 
@@ -229,24 +322,72 @@ function SidePanel() {
   async function startAutoCapture() {
     setAutoCapturing(true);
     autoCaptureRef.current = true;
-    while (autoCaptureRef.current) {
-      await captureAndAnalyze();
-      if (!autoCaptureRef.current) break;
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      // Re-scan to get updated currentTime
+    try {
       const response = await chrome.runtime.sendMessage({ name: "PAGE_SCAN_REQUESTED" }) as RuntimeResponse<PageAccessibilitySnapshot>;
-      if (!response.ok || !autoCaptureRef.current) break;
+      if (!response.ok) {
+        fail("Could not scan the active tab.", response.message);
+        return;
+      }
+
+      snapshotRef.current = response.payload;
       setSnapshot(response.payload);
-      const media = response.payload.media.find((item) => item.id === selectedMediaId) ?? response.payload.media[0];
-      if (!media || media.currentTime === undefined) break;
-      // Stop if video has ended
-      if (media.duration && media.currentTime >= media.duration - 2) {
-        setStatus("Video ended. Auto-capture complete.");
-        break;
+      const media = mediaFromSnapshot(response.payload);
+      if (!media || !media.duration) {
+        fail("Auto-capture needs a video duration.", "The active media did not expose a usable duration.");
+        return;
+      }
+      selectedMediaIdRef.current = media.id;
+      setSelectedMediaId(media.id);
+
+      const chunkSeconds = settings?.chunkSeconds ?? 30;
+      const capturedEnd = capturedRanges.length ? Math.max(...capturedRanges.map((range) => range.end)) : 0;
+      let nextChunkIndex = chunkIndexRef.current;
+
+      for (let start = capturedEnd; start < media.duration && autoCaptureRef.current; start += chunkSeconds) {
+        const end = Math.min(start + chunkSeconds, media.duration);
+        setStatus(`Auto mode processing chunk ${nextChunkIndex + 1}: ${formatClock(start)} to ${formatClock(end)}.`);
+        const ok = await captureAndAnalyze(start, end, nextChunkIndex);
+        if (!ok || !autoCaptureRef.current) break;
+        nextChunkIndex += 1;
+      }
+
+      if (autoCaptureRef.current) {
+        setStatus("All chunks captured. Synthesizing final document.");
+        await synthesizeSession(sessionRef.current?.id);
+        setStatus("Auto-capture complete. Full document synthesized.");
+      }
+    } finally {
+      if (autoCaptureRef.current) {
+        autoCaptureRef.current = false;
+        setAutoCapturing(false);
+      } else {
+        setAutoCapturing(false);
       }
     }
-    setAutoCapturing(false);
-    autoCaptureRef.current = false;
+  }
+
+  async function synthesizeSession(sessionId: string | undefined) {
+    if (!api || !sessionId) return;
+    setStage("upload");
+    setProgressText("Synthesizing all ready chunks...");
+    try {
+      const result = await api.synthesize(sessionId);
+      const nextDocument = await api.getDocument(sessionId);
+      setDocumentPayload(nextDocument);
+      setStage("review");
+      setProgressText("");
+      if (result.summary) {
+        setStatus(`Synthesis complete: ${result.summary.slice(0, 100)}...`);
+      } else {
+        setStatus("Synthesis finished.");
+      }
+    } catch (caught) {
+      fail("Synthesis failed.", String(caught));
+    }
+  }
+
+  async function synthesizeDocument() {
+    await synthesizeSession(sessionRef.current?.id ?? session?.id);
   }
 
   function stopAutoCapture() {
@@ -267,22 +408,6 @@ function SidePanel() {
     }
   }
 
-  async function synthesizeDocument() {
-    if (!api || !session) return;
-    setStatus("Synthesizing full document from all chunks...");
-    try {
-      const result = await api.synthesize(session.id);
-      if (result.summary) {
-        setStatus(`Synthesis complete: ${result.summary.slice(0, 100)}...`);
-      } else {
-        setStatus("Synthesis finished.");
-      }
-      setDocumentPayload(await api.getDocument(session.id));
-    } catch (caught) {
-      fail("Synthesis failed.", String(caught));
-    }
-  }
-
   async function exportDocument() {
     if (!api || !session) return;
     try {
@@ -300,6 +425,55 @@ function SidePanel() {
     } catch (caught) {
       fail("Export failed.", String(caught));
     }
+  }
+
+  async function processVideoUrl(url: string) {
+    if (!api) return;
+    setError("");
+    setStage("upload");
+    startTimer();
+    setStatus("Downloading video and starting full analysis...");
+    setProgressText("Backend is downloading and processing the video...");
+    try {
+      const result = await api.processUrl(url);
+      const newSession = await api.getSessionStatus(result.session_id);
+      setSession(newSession);
+      setStatus(`Processing started for "${newSession.title}". Polling for updates...`);
+      pollForCompletion(result.session_id);
+    } catch (caught) {
+      stopTimer();
+      setProgressText("");
+      fail("URL processing failed.", String(caught));
+    }
+  }
+
+  async function pollForCompletion(sessionId: string) {
+    if (!api) return;
+    const poll = async () => {
+      try {
+        const status = await api.getSessionStatus(sessionId);
+        setSession(status);
+        if (status.status === "ready") {
+          stopTimer();
+          setProgressText("");
+          const doc = await api!.getDocument(sessionId);
+          setDocumentPayload(doc);
+          setStage("review");
+          setStatus(`Document ready: ${doc.blocks.length} blocks from "${status.title}".`);
+          return;
+        }
+        if (status.status === "failed") {
+          stopTimer();
+          setProgressText("");
+          fail("Video processing failed.", status.error_message);
+          return;
+        }
+        setTimeout(poll, 5000);
+      } catch {
+        setTimeout(poll, 8000);
+      }
+    };
+    setTimeout(poll, 5000);
   }
 
   function openInTab() {
@@ -426,6 +600,10 @@ function SidePanel() {
               ranges={capturedRanges}
               duration={focusedMedia?.duration}
               gaps={gapWarnings}
+              onCaptureRange={(start, end) => {
+                seekVideo(start);
+                captureAndAnalyze(start, end);
+              }}
             />
           )}
 
@@ -434,7 +612,7 @@ function SidePanel() {
               <ReloadIcon aria-hidden="true" />
               Scan
             </button>
-            <button type="button" className="button primary" onClick={captureAndAnalyze} disabled={!api || !focusedMedia || isBusy(stage) || autoCapturing}>
+            <button type="button" className="button primary" onClick={() => captureAndAnalyze()} disabled={!api || !focusedMedia || isBusy(stage) || autoCapturing}>
               <PlayIcon aria-hidden="true" />
               Capture
             </button>
@@ -461,6 +639,33 @@ function SidePanel() {
           />
         ) : null}
       </section>
+
+      {!session && (
+        <section className="url-ingest-panel" aria-label="Process video by URL">
+          <div className="section-heading">
+            <h2>Or process by URL</h2>
+          </div>
+          <div className="url-input-row">
+            <input
+              type="url"
+              placeholder="https://www.youtube.com/watch?v=..."
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.currentTarget.value)}
+              disabled={isBusy(stage)}
+            />
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => processVideoUrl(urlInput)}
+              disabled={!api || !urlInput.trim() || isBusy(stage)}
+            >
+              <PlayIcon aria-hidden="true" />
+              Process
+            </button>
+          </div>
+          <p className="url-hint">Downloads the video, extracts frames, fetches transcript, and runs the full AI pipeline automatically.</p>
+        </section>
+      )}
 
       {isBusy(stage) ? <SkeletonReview /> : null}
 
@@ -501,7 +706,10 @@ function SidePanel() {
         editingBlockId={editingBlockId}
         onEdit={setEditingBlockId}
         onSave={saveBlock}
+        onSeek={seekVideo}
       />
+
+      <TranscriptSection transcript={transcript} onSeek={seekVideo} />
     </main>
   );
 }
@@ -521,11 +729,13 @@ function HealthPill({ health }: { health: HealthResponse | null }) {
 function CoverageBar({
   ranges,
   duration,
-  gaps
+  gaps,
+  onCaptureRange
 }: {
   ranges: CapturedRange[];
   duration: number | undefined;
   gaps: { start: number; end: number }[];
+  onCaptureRange?: (start: number, end: number) => void;
 }) {
   const totalDuration = duration || Math.max(...ranges.map((r) => r.end), 60);
   return (
@@ -542,14 +752,17 @@ function CoverageBar({
           />
         ))}
         {gaps.map((gap, index) => (
-          <div
+          <button
             key={`gap-${index}`}
+            type="button"
             className="coverage-gap"
             style={{
               left: `${(gap.start / totalDuration) * 100}%`,
               width: `${((gap.end - gap.start) / totalDuration) * 100}%`
             }}
-            title={`Gap: ${formatClock(gap.start)} to ${formatClock(gap.end)}`}
+            title={`Gap: ${formatClock(gap.start)} to ${formatClock(gap.end)} — click to capture`}
+            aria-label={`Capture gap from ${formatClock(gap.start)} to ${formatClock(gap.end)}`}
+            onClick={() => onCaptureRange?.(gap.start, gap.end)}
           />
         ))}
       </div>
@@ -676,6 +889,14 @@ function ConnectionPanel({
           onChange={(event) => settings && onChange({ ...settings, framesPerChunk: Number(event.currentTarget.value) })}
         />
       </label>
+      <label className="field checkbox-field">
+        <input
+          type="checkbox"
+          checked={Boolean(settings?.autoCapture)}
+          onChange={(event) => settings && onChange({ ...settings, autoCapture: event.currentTarget.checked })}
+        />
+        <span>Start in auto mode</span>
+      </label>
       <button type="button" className="button subtle" onClick={onSave} disabled={disabled}>
         <CheckCircledIcon aria-hidden="true" />
         Save
@@ -688,12 +909,14 @@ function DocumentReview({
   documentPayload,
   editingBlockId,
   onEdit,
-  onSave
+  onSave,
+  onSeek
 }: {
   documentPayload: ReadingDocumentResponse | null;
   editingBlockId: string | null;
   onEdit: (id: string | null) => void;
   onSave: (block: ReadingBlock, body: string) => void;
+  onSeek: (seconds: number) => void;
 }) {
   if (!documentPayload) {
     return (
@@ -721,6 +944,7 @@ function DocumentReview({
             onEdit={() => onEdit(block.id)}
             onCancel={() => onEdit(null)}
             onSave={(body) => onSave(block, body)}
+            onSeek={onSeek}
           />
         ))}
       </div>
@@ -733,13 +957,15 @@ function ReviewBlock({
   editing,
   onEdit,
   onCancel,
-  onSave
+  onSave,
+  onSeek
 }: {
   block: ReadingBlock;
   editing: boolean;
   onEdit: () => void;
   onCancel: () => void;
   onSave: (body: string) => void;
+  onSeek: (seconds: number) => void;
 }) {
   const [draft, setDraft] = useState(block.body);
 
@@ -751,7 +977,17 @@ function ReviewBlock({
     <article className="review-block">
       <header>
         <div>
-          <p className="label">{readableKind(block.kind)} at {formatClock(block.start_seconds)}</p>
+          <p className="label">
+            {readableKind(block.kind)} at{" "}
+            <button
+              type="button"
+              className="block-timestamp"
+              onClick={() => onSeek(block.start_seconds)}
+              aria-label={`Seek to ${formatClock(block.start_seconds)}`}
+            >
+              {formatClock(block.start_seconds)}
+            </button>
+          </p>
           <h3>{block.heading || "Untitled block"}</h3>
         </div>
         <span className="confidence">{Math.round(block.confidence * 100)}%</span>
@@ -775,7 +1011,7 @@ function ReviewBlock({
         </div>
       ) : (
         <>
-          <p className={block.kind === "code" ? "block-body code-block" : "block-body"}>{block.body}</p>
+          <RenderedBody body={block.body} isCode={block.kind === "code"} />
           <div className="block-footer">
             {block.is_user_edited ? <span className="edited">Reviewer edited</span> : <span>Source evidence {block.source_evidence.length}</span>}
             <button type="button" className="icon-button" onClick={onEdit} aria-label={`Edit ${block.heading || "reading block"}`}>
@@ -786,6 +1022,137 @@ function ReviewBlock({
       )}
     </article>
   );
+}
+
+function RenderedBody({ body, isCode }: { body: string; isCode: boolean }) {
+  if (isCode) {
+    return <pre className="block-body code-block"><code>{body}</code></pre>;
+  }
+
+  const rendered = renderMarkdown(body);
+  return <div className="block-body" dangerouslySetInnerHTML={{ __html: rendered }} />;
+}
+
+function renderMarkdown(text: string): string {
+  // Handle fenced code blocks (```...```)
+  let result = text.replace(/```[\s\S]*?```/g, (match) => {
+    const code = match.slice(3, -3).replace(/^\w*\n/, "");
+    return `<pre class="code-block"><code>${escapeHtml(code)}</code></pre>`;
+  });
+
+  // Split into lines for line-level processing
+  const lines = result.split("\n");
+  const output: string[] = [];
+  let inList = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Check if it's already a pre block (from fenced code above)
+    if (trimmed.startsWith("<pre")) {
+      if (inList) { output.push("</ul>"); inList = false; }
+      output.push(line);
+      continue;
+    }
+    if (trimmed.startsWith("</pre>") || trimmed.startsWith("<code>") || trimmed.startsWith("</code>")) {
+      output.push(line);
+      continue;
+    }
+
+    // Bullet list items
+    if (/^[-*]\s+/.test(trimmed)) {
+      if (!inList) { output.push("<ul>"); inList = true; }
+      const content = inlineFormat(trimmed.replace(/^[-*]\s+/, ""));
+      output.push(`<li>${content}</li>`);
+      continue;
+    }
+
+    // End list if not a list item
+    if (inList) { output.push("</ul>"); inList = false; }
+
+    if (trimmed === "") {
+      output.push("<br>");
+    } else {
+      output.push(inlineFormat(trimmed));
+    }
+  }
+
+  if (inList) output.push("</ul>");
+  return output.join("\n");
+}
+
+function inlineFormat(text: string): string {
+  // Bold: **text**
+  let result = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // Inline code: `text`
+  result = result.replace(/`([^`]+)`/g, "<code>$1</code>");
+  return result;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function TranscriptSection({
+  transcript,
+  onSeek
+}: {
+  transcript: TranscriptResponse | null;
+  onSeek: (seconds: number) => void;
+}) {
+  const [collapsed, setCollapsed] = useState(true);
+
+  if (!transcript || !transcript.segments.length) return null;
+
+  return (
+    <section className="transcript-section" aria-label="Video transcript">
+      <button
+        type="button"
+        className="section-heading"
+        onClick={() => setCollapsed((v) => !v)}
+        aria-expanded={!collapsed}
+      >
+        <h2>Transcript ({transcript.segments.length} segments)</h2>
+        <span>{collapsed ? "Show" : "Hide"}</span>
+      </button>
+      {!collapsed && (
+        <div className="transcript-list">
+          {transcript.segments.map((seg, index) => (
+            <div key={index} className="transcript-entry">
+              <button
+                type="button"
+                className="transcript-time"
+                onClick={() => onSeek(seg.start)}
+                aria-label={`Seek to ${formatClock(seg.start)}`}
+              >
+                {formatClock(seg.start)}
+              </button>
+              <span>{seg.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function sseEventLabel(type: string, message?: string): string {
+  if (message) return message;
+  const labels: Record<string, string> = {
+    "chunk.accepted": "Chunk accepted by agents...",
+    "chunk.analyzing": "Agents are analyzing...",
+    "chunk.ready": "Chunk analysis complete!",
+    "document.updated": "Document updated!",
+    "document.synthesizing": "Synthesizing document...",
+    "agent.visual": "Visual agent processing...",
+    "agent.text": "Text agent processing...",
+    "agent.final": "Final agent processing..."
+  };
+  return labels[type] || `Processing: ${type}...`;
 }
 
 function Timeline({ moments }: { moments: ReadingDocumentResponse["timeline"] }) {

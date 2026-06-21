@@ -7,7 +7,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   apiToken: "",
   chunkSeconds: 30,
   framesPerChunk: 4,
-  autoCapture: false
+  autoCapture: true
 };
 
 export async function loadSettings(): Promise<ExtensionSettings> {

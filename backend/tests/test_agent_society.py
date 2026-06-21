@@ -69,17 +69,22 @@ class DeterministicQwen:
 
 @pytest.mark.django_db
 def test_agent_society_creates_reading_document_without_summary_kind() -> None:
-    session = VideoSession.objects.create(title="Django Ninja tutorial", source_url="https://example.com/video")
+    session = VideoSession.objects.create(
+        title="Django Ninja tutorial",
+        source_url="https://example.com/video",
+        status=VideoSession.Status.PROCESSING,
+    )
     chunk = VideoChunk.objects.create(session=session, chunk_index=0, start_seconds=6, end_seconds=30)
 
     runner = AgentSocietyRunner(qwen_client=DeterministicQwen())
     result = runner.process_chunk(chunk)
 
     chunk.refresh_from_db()
+    session.refresh_from_db()
     assert chunk.status == VideoChunk.Status.READY
+    assert session.status == VideoSession.Status.PROCESSING
     assert AgentRun.objects.filter(chunk=chunk).count() == 5
     assert ReadingBlock.objects.filter(chunk=chunk).count() == 2
     assert TimelineMoment.objects.filter(chunk=chunk).count() == 1
     assert [block.kind for block in result["blocks"]] == ["explanation", "code"]
     assert "summary" not in {block.kind for block in result["blocks"]}
-

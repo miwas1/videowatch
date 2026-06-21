@@ -123,9 +123,6 @@ class AgentSocietyRunner:
             chunk.qwen_request_ids = [rid for rid in request_ids if rid]
             chunk.latency_ms = round((time.perf_counter() - started) * 1000)
             chunk.save(update_fields=["status", "error_message", "qwen_request_ids", "latency_ms", "updated_at"])
-            chunk.session.status = chunk.session.Status.READY
-            chunk.session.error_message = ""
-            chunk.session.save(update_fields=["status", "error_message", "updated_at"])
 
         emit_event(
             chunk.session,

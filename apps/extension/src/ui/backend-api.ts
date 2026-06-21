@@ -132,6 +132,17 @@ export class DescribeOpsApi {
     return this.requestJson<SessionResponse>(`/api/v1/sessions/${sessionId}`, { method: "GET" });
   }
 
+  async processUrl(url: string, options?: { chunkSeconds?: number; frameCount?: number }): Promise<{ session_id: string; status: string; message: string }> {
+    return this.requestJson<{ session_id: string; status: string; message: string }>("/api/v1/ingest/from-url", {
+      method: "POST",
+      body: JSON.stringify({
+        url,
+        chunk_seconds: options?.chunkSeconds ?? this.settings.chunkSeconds,
+        frame_count: options?.frameCount ?? this.settings.framesPerChunk
+      })
+    });
+  }
+
   private async requestJson<T>(
     path: string,
     init: RequestInit & { auth?: boolean; contentType?: string | null }

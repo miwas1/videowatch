@@ -6,13 +6,13 @@ from uuid import UUID
 
 from django.conf import settings
 from django.db import transaction
-from django.http import HttpRequest, StreamingHttpResponse
+from django.http import FileResponse, HttpRequest, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from ninja import File, Form, NinjaAPI, Status
 from ninja.files import UploadedFile
 from ninja.security import APIKeyHeader
 
-from reader.models import ReadingBlock, TimelineMoment, UserCorrection, VideoChunk, VideoSession
+from reader.models import FrameAsset, ReadingBlock, TimelineMoment, UserCorrection, VideoChunk, VideoSession
 from reader.schemas import (
     ChunkResponse,
     CorrectionRequest,
@@ -24,12 +24,23 @@ from reader.schemas import (
     SessionResponse,
     TimelineMomentResponse,
     TranscriptRequest,
+    UrlProcessRequest,
 )
 from reader.services.agents import AgentSocietyRunner
 from reader.services.events import emit_event
 from reader.services.export import export_reading_document_markdown
 from reader.services.qwen import QwenConfigurationError, QwenResponseError
 from reader.services.storage import FrameValidationError, save_uploaded_frame
+from reader.services.media_ingest import (
+    attach_frame_file,
+    create_session_from_download,
+    download_youtube_video,
+    extract_frames_for_chunk,
+    probe_duration,
+    safe_slug,
+    timed_transcript_from_vtt,
+    transcript_for_range,
+)
 from reader.services.transcript import fetch_transcript_for_url
 
 
@@ -65,6 +76,14 @@ api = NinjaAPI(
     description="Turns extension-captured video context into context-preserving reading documents.",
     auth=ExtensionTokenAuth(),
 )
+
+
+def mark_session_ready_when_current_chunks_ready(session: VideoSession) -> None:
+    if session.chunks.exists() and not session.chunks.exclude(status=VideoChunk.Status.READY).exists():
+        session.status = VideoSession.Status.READY
+        session.error_message = ""
+        session.save(update_fields=["status", "error_message", "updated_at"])
+        emit_event(session, "session.ready", {"session_id": str(session.id)})
 
 
 def block_schema(block: ReadingBlock) -> ReadingBlockResponse:
@@ -205,6 +224,7 @@ def upload_chunk(
     if process_now:
         try:
             AgentSocietyRunner().process_chunk(chunk)
+            mark_session_ready_when_current_chunks_ready(session)
         except (QwenConfigurationError, QwenResponseError) as exc:
             chunk.status = VideoChunk.Status.FAILED
             chunk.error_message = str(exc)
@@ -306,6 +326,7 @@ def upload_chunk_async(
     def _process():
         try:
             AgentSocietyRunner().process_chunk(chunk)
+            mark_session_ready_when_current_chunks_ready(session)
         except (QwenConfigurationError, QwenResponseError) as exc:
             chunk.status = VideoChunk.Status.FAILED
             chunk.error_message = str(exc)
@@ -350,3 +371,106 @@ def get_transcript(request: HttpRequest, payload: TranscriptRequest) -> Status:
         return Status(200, result)
     except Exception as exc:
         return Status(400, ErrorResponse(detail=str(exc)))
+
+
+@api.get("/api/v1/frames/{frame_id}")
+def get_frame(request: HttpRequest, frame_id: UUID) -> FileResponse:
+    frame = get_object_or_404(FrameAsset, id=frame_id)
+    return FileResponse(frame.file.open("rb"), content_type=frame.mime_type)
+
+
+@api.post("/api/v1/ingest/from-url", response={202: dict, 400: ErrorResponse})
+def create_session_from_url(request: HttpRequest, payload: UrlProcessRequest) -> Status:
+    if not payload.url:
+        return Status(400, ErrorResponse(detail="url is required."))
+
+    from pathlib import Path
+    import tempfile
+
+    work_dir = Path(tempfile.mkdtemp(prefix="describeops-ingest-"))
+
+    try:
+        download = download_youtube_video(payload.url, work_dir, max_height=payload.max_height)
+    except Exception as exc:
+        return Status(400, ErrorResponse(detail=str(exc)))
+
+    session = create_session_from_download(
+        download,
+        settings_payload={
+            "chunk_seconds": payload.chunk_seconds,
+            "frame_count": payload.frame_count,
+            "frame_width": payload.frame_width,
+            "max_height": payload.max_height,
+        },
+    )
+    session.status = VideoSession.Status.PROCESSING
+    session.save(update_fields=["status", "updated_at"])
+    emit_event(session, "session.created", {"session_id": str(session.id)})
+
+    import threading
+
+    def _process():
+        try:
+            duration = download.metadata.get("duration_seconds") or probe_duration(download.video_path)
+            segments = timed_transcript_from_vtt(download.subtitle_paths)
+            chunk_seconds = payload.chunk_seconds
+            chunk_index = 0
+            start = 0.0
+
+            while start < duration:
+                end = min(start + chunk_seconds, duration)
+                transcript_text = transcript_for_range(segments, start_seconds=start, end_seconds=end)
+
+                chunk = VideoChunk.objects.create(
+                    session=session,
+                    chunk_index=chunk_index,
+                    start_seconds=start,
+                    end_seconds=end,
+                    transcript_text=transcript_text,
+                    status=VideoChunk.Status.ACCEPTED,
+                )
+
+                frames_dir = work_dir / f"frames-{chunk_index:05d}"
+                frame_paths = extract_frames_for_chunk(
+                    video_path=download.video_path,
+                    output_dir=frames_dir,
+                    start_seconds=start,
+                    end_seconds=end,
+                    frame_count=payload.frame_count,
+                    width=payload.frame_width,
+                )
+                for frame_path in frame_paths:
+                    attach_frame_file(chunk, frame_path)
+
+                emit_event(session, "chunk.accepted", {"chunk_id": str(chunk.id), "chunk_index": chunk.chunk_index})
+
+                try:
+                    AgentSocietyRunner().process_chunk(chunk)
+                except (QwenConfigurationError, QwenResponseError) as exc:
+                    chunk.status = VideoChunk.Status.FAILED
+                    chunk.error_message = str(exc)
+                    chunk.save(update_fields=["status", "error_message", "updated_at"])
+                    emit_event(session, "chunk.error", {"chunk_id": str(chunk.id), "detail": str(exc)})
+
+                start = end
+                chunk_index += 1
+
+            session.refresh_from_db()
+            if session.chunks.filter(status=VideoChunk.Status.FAILED).exists():
+                session.status = VideoSession.Status.FAILED
+                session.error_message = "One or more chunks failed during ingestion."
+                session.save(update_fields=["status", "error_message", "updated_at"])
+                emit_event(session, "session.error", {"session_id": str(session.id), "detail": session.error_message})
+            else:
+                session.status = VideoSession.Status.READY
+                session.error_message = ""
+                session.save(update_fields=["status", "error_message", "updated_at"])
+                emit_event(session, "session.ready", {"session_id": str(session.id)})
+        except Exception as exc:
+            session.status = VideoSession.Status.FAILED
+            session.error_message = str(exc)
+            session.save(update_fields=["status", "error_message", "updated_at"])
+            emit_event(session, "session.error", {"session_id": str(session.id), "detail": str(exc)})
+
+    threading.Thread(target=_process, daemon=True).start()
+    return Status(202, {"session_id": str(session.id), "status": "processing", "message": "Video ingestion started in background."})

@@ -98,3 +98,11 @@ class CorrectionResponse(Schema):
 class TranscriptRequest(Schema):
     url: str
 
+
+class UrlProcessRequest(Schema):
+    url: str
+    chunk_seconds: int = 30
+    frame_count: int = 4
+    frame_width: int = 640
+    max_height: int = 360
+

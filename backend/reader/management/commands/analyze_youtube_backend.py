@@ -107,6 +107,9 @@ class Command(BaseCommand):
                 self.stdout.write(f"Chunk {index + 1}/{total_chunks}: {start:.0f}s-{end:.0f}s, {len(frame_paths)} frames")
                 runner.process_chunk(chunk)
 
+            session.status = VideoSession.Status.READY
+            session.error_message = ""
+            session.save(update_fields=["status", "error_message", "updated_at"])
             manifest = export_session_artifacts(session, output_dir, audio_path=copied_audio)
             manifest["source_video"] = str(copied_video)
             manifest["subtitle_files"] = [str(output_dir / "source" / path.name) for path in download.subtitle_paths]

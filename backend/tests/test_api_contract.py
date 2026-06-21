@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -103,6 +105,57 @@ def test_session_chunk_document_and_correction_flow(monkeypatch: pytest.MonkeyPa
     )
     assert correction_response.status_code == 200
     assert correction_response.json()["block"]["is_user_edited"] is True
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN, MEDIA_ROOT="/tmp/describeops-test-media")
+def test_url_ingest_marks_session_ready_only_after_all_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed_statuses: list[str] = []
+
+    class ImmediateThread:
+        def __init__(self, target: Any, daemon: bool = False) -> None:
+            self.target = target
+            self.daemon = daemon
+
+        def start(self) -> None:
+            self.target()
+
+    class ChunkOnlyRunner:
+        def process_chunk(self, chunk: VideoChunk) -> dict[str, Any]:
+            chunk.status = VideoChunk.Status.READY
+            chunk.save(update_fields=["status", "updated_at"])
+            chunk.session.refresh_from_db()
+            observed_statuses.append(chunk.session.status)
+            return {}
+
+    monkeypatch.setattr("threading.Thread", ImmediateThread)
+    monkeypatch.setattr(
+        "reader.api.download_youtube_video",
+        lambda url, work_dir, max_height: SimpleNamespace(
+            video_path=Path("video.mp4"),
+            metadata={
+                "webpage_url": url,
+                "title": "Two chunk video",
+                "duration_seconds": 60,
+            },
+            subtitle_paths=[],
+        ),
+    )
+    monkeypatch.setattr("reader.api.timed_transcript_from_vtt", lambda subtitle_paths: [])
+    monkeypatch.setattr("reader.api.extract_frames_for_chunk", lambda **kwargs: [])
+    monkeypatch.setattr("reader.api.AgentSocietyRunner", lambda: ChunkOnlyRunner())
+
+    response = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).post(
+        "/api/v1/ingest/from-url",
+        data={"url": "https://example.com/watch?v=two-chunks", "chunk_seconds": 30},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 202
+    session = VideoSession.objects.get(id=response.json()["session_id"])
+    assert observed_statuses == [VideoSession.Status.PROCESSING, VideoSession.Status.PROCESSING]
+    assert session.status == VideoSession.Status.READY
+    assert session.chunks.count() == 2
 
 
 @pytest.mark.django_db

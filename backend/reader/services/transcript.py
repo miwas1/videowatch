@@ -35,7 +35,7 @@ def fetch_transcript_for_url(url: str) -> dict[str, Any]:
 
         vtt_paths = sorted(work_dir.glob("*.vtt"))
         segments = deduplicate_segments(timed_transcript_from_vtt(vtt_paths))
-        full_text = " ".join(seg["text"] for seg in segments)
+        full_text = build_full_text(segments)
 
         return {
             "url": url,
@@ -46,6 +46,29 @@ def fetch_transcript_for_url(url: str) -> dict[str, Any]:
             "full_text": full_text,
             "segment_count": len(segments),
         }
+
+
+def build_full_text(segments: list[dict[str, Any]]) -> str:
+    if not segments:
+        return ""
+    # Each YouTube auto-caption segment carries forward words from the previous.
+    # To build clean full text, take only the NEW words from each segment.
+    result_words: list[str] = []
+    prev_words: list[str] = []
+    for seg in segments:
+        words = seg["text"].split()
+        if prev_words:
+            # Find where the overlap ends — look for the suffix of prev in prefix of current
+            overlap = 0
+            for i in range(min(len(prev_words), len(words))):
+                if words[:i + 1] == prev_words[-(i + 1):]:
+                    overlap = i + 1
+            new_words = words[overlap:]
+        else:
+            new_words = words
+        result_words.extend(new_words)
+        prev_words = words
+    return " ".join(result_words)
 
 
 def deduplicate_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:

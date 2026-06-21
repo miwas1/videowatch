@@ -24,7 +24,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     message?.name === "CAPTURE_MULTI_FRAMES_REQUESTED" ||
     message?.name === "DESCRIPTIONS_ATTACH_REQUESTED" ||
     message?.name === "DESCRIPTIONS_STOP_REQUESTED" ||
-    message?.name === "DESCRIBE_NOW_REQUESTED"
+    message?.name === "DESCRIBE_NOW_REQUESTED" ||
+    message?.name === "SEEK_VIDEO_REQUESTED"
   ) {
     sendToActiveTab(message).then(sendResponse).catch((error) => {
       sendResponse({ ok: false, message: "DescribeOps could not reach the active tab.", diagnostics: String(error) });
