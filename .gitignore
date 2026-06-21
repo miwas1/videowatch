@@ -18,3 +18,6 @@ apps/desktop-companion/dist/
 apps/desktop-companion/src-tauri/target/
 
 .youtube_qwen_cache
+backend/db.sqlite3
+backend/media/
+outputs/

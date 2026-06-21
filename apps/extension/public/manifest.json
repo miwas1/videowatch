@@ -1,12 +1,19 @@
 {
   "manifest_version": 3,
   "name": "DescribeOps",
-  "description": "Qwen-powered accessibility browser agent for video and web content.",
+  "description": "Permissioned browser accessibility layer for video reading documents and audio descriptions.",
   "version": "0.1.0",
   "minimum_chrome_version": "116",
   "action": {
     "default_title": "DescribeOps",
     "default_popup": "popup.html"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
   },
   "commands": {
     "describe-current-state": {
@@ -16,13 +23,6 @@
       "description": "Describe the current video moment"
     }
   },
-  "side_panel": {
-    "default_path": "sidepanel.html"
-  },
-  "background": {
-    "service_worker": "service-worker.js",
-    "type": "module"
-  },
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*", "file:///*"],
@@ -31,7 +31,7 @@
       "all_frames": false
     }
   ],
-  "permissions": ["activeTab", "nativeMessaging", "offscreen", "sidePanel", "scripting", "storage", "tabCapture"],
+  "permissions": ["activeTab", "sidePanel", "scripting", "storage", "tabCapture"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "optional_host_permissions": ["file:///*"],
   "content_security_policy": {

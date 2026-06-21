@@ -9,10 +9,6 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "types": ["chrome", "node"],
-    "baseUrl": ".",
-    "paths": {
-      "@describeops/shared": ["packages/shared/src/index.ts"]
-    }
+    "types": ["chrome", "node"]
   }
 }
