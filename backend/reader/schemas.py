@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from ninja import Schema
+from pydantic import Field
 
 
 class ErrorResponse(Schema):
@@ -25,9 +26,12 @@ class SessionResponse(Schema):
     title: str
     page_title: str
     status: str
+    pipeline_stage: str
+    expected_chunk_count: int | None
     duration_seconds: float | None
     settings: dict[str, Any]
     error_message: str
+    synthesis_error: str
     created_at: datetime
     updated_at: datetime
 
@@ -105,4 +109,73 @@ class UrlProcessRequest(Schema):
     frame_count: int = 4
     frame_width: int = 640
     max_height: int = 360
+    workflow_template: str = "reading_document"
+    auto_synthesize: bool = True
+    output_targets: list[str] = Field(default_factory=list)
 
+
+class SessionListItemResponse(Schema):
+    id: UUID
+    source_url: str
+    title: str
+    page_title: str
+    status: str
+    pipeline_stage: str
+    duration_seconds: float | None
+    workflow_template: str
+    chunk_count: int
+    ready_chunk_count: int
+    failed_chunk_count: int
+    artifact_count: int
+    expected_chunk_count: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChunkSummaryResponse(Schema):
+    id: UUID
+    chunk_index: int
+    start_seconds: float
+    end_seconds: float
+    status: str
+    error_message: str
+    frame_count: int
+    block_count: int
+    latency_ms: int | None
+
+
+class SessionProgressResponse(Schema):
+    session_id: UUID
+    status: str
+    step: str
+    percent: int
+    total_chunks: int
+    ready_chunks: int
+    failed_chunks: int
+    artifact_ready: bool
+    artifact_required: bool
+    last_event_type: str
+    error_message: str
+    synthesis_error: str
+
+
+class ArtifactResponse(Schema):
+    id: UUID
+    artifact_type: str
+    workflow_template: str
+    title: str
+    summary: str
+    markdown: str
+    payload: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ArtifactRegenerateRequest(Schema):
+    workflow_template: str = ""
+    artifact_type: str = "reading_document"
+
+
+class RetrySynthesisRequest(Schema):
+    workflow_template: str = "reading_document"
+    output_targets: list[str] = Field(default_factory=list)

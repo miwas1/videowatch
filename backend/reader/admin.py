@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from .models import AgentRun, FrameAsset, ReadingBlock, SessionEvent, TimelineMoment, UserCorrection, VideoChunk, VideoSession
+from .models import AgentRun, FrameAsset, GeneratedArtifact, ReadingBlock, SessionEvent, TimelineMoment, UserCorrection, VideoChunk, VideoSession
 
 
 @admin.register(VideoSession)
 class VideoSessionAdmin(admin.ModelAdmin):
-    list_display = ("id", "title", "status", "source_url", "created_at", "updated_at")
+    list_display = ("id", "title", "status", "pipeline_stage", "source_url", "created_at", "updated_at")
     search_fields = ("title", "source_url")
-    list_filter = ("status",)
+    list_filter = ("status", "pipeline_stage")
 
 
 @admin.register(VideoChunk)
@@ -24,4 +24,4 @@ admin.site.register(ReadingBlock)
 admin.site.register(TimelineMoment)
 admin.site.register(SessionEvent)
 admin.site.register(UserCorrection)
-
+admin.site.register(GeneratedArtifact)

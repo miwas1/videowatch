@@ -75,6 +75,7 @@ class QwenClient:
             base_url=normalize_dashscope_base(settings.DASHSCOPE_BASE_URL),
             timeout=240.0,
         )
+        self._frame_cache: dict[str, str] = {}
 
     def multimodal_json(
         self,
@@ -196,6 +197,11 @@ class QwenClient:
         raise QwenResponseError(f"All configured Qwen models failed. Last error: {last_error}")
 
     def _frame_data_url(self, frame: FrameAsset) -> str:
+        frame_id = str(frame.id)
+        if frame_id in self._frame_cache:
+            return self._frame_cache[frame_id]
         path = Path(frame.file.path)
         encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
-        return f"data:{frame.mime_type};base64,{encoded}"
+        data_url = f"data:{frame.mime_type};base64,{encoded}"
+        self._frame_cache[frame_id] = data_url
+        return data_url

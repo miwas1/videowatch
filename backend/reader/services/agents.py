@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,19 @@ PROMPT_VERSION = "video-reading-document-v1"
 SYSTEM_JSON = """You are part of an agent society that translates video into a context-preserving reading document.
 Return valid JSON only. Do not mention that you are an AI model. Do not summarize away steps, examples, jokes,
 visual details, code, terminal output, diagrams, or demonstrations."""
+
+SYNTHESIS_PROFILES: dict[str, str] = {
+    "reading_document": "Create an accessible lesson that preserves teaching flow, examples, and essential visual context.",
+    "course_notes": "Create structured lecture notes with key terms, concepts, examples, and final takeaways.",
+    "audio_description": "Create a chronological spoken-cue script. Keep cues concise, concrete, and timestamped.",
+    "tutorial_extraction": "Create an executable tutorial with ordered steps, exact code or commands, and UI outcomes.",
+    "compliance_report": "Create an accessibility review with findings, severity, evidence timestamps, and recommendations.",
+    "video_to_document": "Create a polished standalone article with a clear narrative and useful section hierarchy.",
+    "meeting_reconstruction": "Create meeting notes with discussion flow, decisions, demo steps, owners, and action items.",
+    "assistive_cues": "Create concise timestamped 'what is happening now' cues for an assistive playback companion.",
+    "research_digest": "Create a research digest separating claims, supporting evidence, quotes, examples, and conclusions.",
+    "localization_brief": "Create a localization brief with translatable segments, terminology, visual notes, and timing constraints.",
+}
 
 
 @dataclass(frozen=True)
@@ -94,22 +108,48 @@ class AgentSocietyRunner:
     def process_chunk(self, chunk: VideoChunk) -> dict[str, Any]:
         started = time.perf_counter()
         frames = list(chunk.frames.all())
+        frame_ids = [str(f.id) for f in frames]
         prior_outputs: list[dict[str, Any]] = []
         request_ids: list[str] = []
         emit_event(chunk.session, "chunk.analyzing", {"chunk_id": str(chunk.id), "chunk_index": chunk.chunk_index})
 
-        for spec in agent_specs():
-            user_prompt = self._build_agent_prompt(spec, chunk, prior_outputs)
-            result = self._call_agent(spec, user_prompt, frames)
+        specs = agent_specs()
+        parallel_specs = [s for s in specs if s.uses_frames]
+        sequential_specs = [s for s in specs if not s.uses_frames]
+
+        # Run visual agents in parallel (they don't depend on prior outputs)
+        parallel_results: dict[str, tuple[QwenResult, AgentRun]] = {}
+        with ThreadPoolExecutor(max_workers=len(parallel_specs)) as executor:
+            futures = {}
+            for spec in parallel_specs:
+                user_prompt = self._build_agent_prompt(spec, chunk, [])
+                cached = self._check_cache(chunk, spec, user_prompt, frame_ids)
+                if cached:
+                    parallel_results[spec.role] = cached
+                else:
+                    futures[executor.submit(self._call_agent, spec, user_prompt, frames)] = (spec, user_prompt)
+            for future in as_completed(futures):
+                spec, user_prompt = futures[future]
+                result = future.result()
+                run = self._store_agent_run(chunk, spec, user_prompt, result, frame_ids)
+                parallel_results[spec.role] = (result, run)
+
+        for spec in parallel_specs:
+            result, run = parallel_results[spec.role]
             request_ids.append(result.request_id)
-            run = self._store_agent_run(chunk, spec, user_prompt, result)
-            prior_outputs.append(
-                {
-                    "role": spec.role,
-                    "confidence": run.confidence,
-                    "output": result.content,
-                }
-            )
+            prior_outputs.append({"role": spec.role, "confidence": run.confidence, "output": result.content})
+
+        # Run text agents sequentially (they depend on prior outputs)
+        for spec in sequential_specs:
+            user_prompt = self._build_agent_prompt(spec, chunk, prior_outputs)
+            cached = self._check_cache(chunk, spec, user_prompt, frame_ids)
+            if cached:
+                result, run = cached
+            else:
+                result = self._call_agent(spec, user_prompt, frames)
+                run = self._store_agent_run(chunk, spec, user_prompt, result, frame_ids)
+            request_ids.append(result.request_id)
+            prior_outputs.append({"role": spec.role, "confidence": run.confidence, "output": result.content})
 
         final = prior_outputs[-1]["output"] if prior_outputs else {}
         raw_fallback = self._fallback_blocks_from_outputs(chunk, prior_outputs)
@@ -166,7 +206,26 @@ class AgentSocietyRunner:
             f"Previous agent outputs:\n{prior_outputs if prior_outputs else '[none yet]'}"
         )
 
-    def _store_agent_run(self, chunk: VideoChunk, spec: AgentSpec, prompt: str, result: QwenResult) -> AgentRun:
+    def _check_cache(self, chunk: VideoChunk, spec: AgentSpec, prompt: str, frame_ids: list[str]) -> tuple[QwenResult, AgentRun] | None:
+        input_hash = stable_hash({"prompt": prompt, "frame_ids": frame_ids})
+        existing = AgentRun.objects.filter(
+            chunk=chunk,
+            role=spec.role,
+            prompt_version=PROMPT_VERSION,
+            input_hash=input_hash,
+        ).first()
+        if existing:
+            result = QwenResult(
+                model=existing.model,
+                content=existing.output,
+                raw_text="",
+                latency_ms=existing.latency_ms,
+                request_id=existing.request_id,
+            )
+            return result, existing
+        return None
+
+    def _store_agent_run(self, chunk: VideoChunk, spec: AgentSpec, prompt: str, result: QwenResult, frame_ids: list[str]) -> AgentRun:
         confidence = result.content.get("confidence", 0.0)
         try:
             confidence_value = max(0.0, min(1.0, float(confidence)))
@@ -177,7 +236,7 @@ class AgentSocietyRunner:
             role=spec.role,
             model=result.model,
             prompt_version=PROMPT_VERSION,
-            input_hash=stable_hash({"prompt": prompt, "frame_ids": [str(frame.id) for frame in chunk.frames.all()]}),
+            input_hash=stable_hash({"prompt": prompt, "frame_ids": frame_ids}),
             output=result.content,
             confidence=confidence_value,
             latency_ms=result.latency_ms,
@@ -185,9 +244,12 @@ class AgentSocietyRunner:
         )
 
     def _create_blocks(self, chunk: VideoChunk, raw_blocks: list[Any]) -> list[ReadingBlock]:
-        blocks: list[ReadingBlock] = []
         valid_kinds = {choice[0] for choice in ReadingBlock.Kind.choices}
-        next_order = (chunk.session.reading_blocks.order_by("-order").first().order + 1) if chunk.session.reading_blocks.exists() else 0
+        from django.db.models import Max
+        max_order = chunk.session.reading_blocks.aggregate(m=Max("order"))["m"]
+        next_order = (max_order + 1) if max_order is not None else 0
+
+        to_create: list[ReadingBlock] = []
         for index, raw in enumerate(raw_blocks):
             if not isinstance(raw, dict):
                 continue
@@ -204,8 +266,8 @@ class AgentSocietyRunner:
                 confidence_value = max(0.0, min(1.0, float(confidence)))
             except (TypeError, ValueError):
                 confidence_value = 0.0
-            blocks.append(
-                ReadingBlock.objects.create(
+            to_create.append(
+                ReadingBlock(
                     session=chunk.session,
                     chunk=chunk,
                     order=next_order + index,
@@ -218,10 +280,10 @@ class AgentSocietyRunner:
                     confidence=confidence_value,
                 )
             )
-        return blocks
+        return ReadingBlock.objects.bulk_create(to_create)
 
     def _create_timeline(self, chunk: VideoChunk, raw_moments: list[Any]) -> list[TimelineMoment]:
-        moments: list[TimelineMoment] = []
+        to_create: list[TimelineMoment] = []
         for raw in raw_moments:
             if not isinstance(raw, dict):
                 continue
@@ -233,8 +295,8 @@ class AgentSocietyRunner:
                 importance_value = max(1, min(5, int(importance)))
             except (TypeError, ValueError):
                 importance_value = 3
-            moments.append(
-                TimelineMoment.objects.create(
+            to_create.append(
+                TimelineMoment(
                     session=chunk.session,
                     chunk=chunk,
                     timestamp_seconds=float(raw.get("timestamp_seconds") or chunk.start_seconds),
@@ -243,9 +305,9 @@ class AgentSocietyRunner:
                     importance=importance_value,
                 )
             )
-        return moments
+        return TimelineMoment.objects.bulk_create(to_create)
 
-    def synthesize_session(self, session: VideoSession) -> dict[str, Any]:
+    def synthesize_session(self, session: VideoSession, workflow_template: str = "reading_document") -> dict[str, Any]:
         if not settings.QWEN_ENABLE_FINAL_REPORT_AGENT:
             return {"skipped": True}
 
@@ -271,25 +333,30 @@ class AgentSocietyRunner:
             for m in moments[:30]
         ]
 
+        workflow_instruction = SYNTHESIS_PROFILES.get(workflow_template, SYNTHESIS_PROFILES["reading_document"])
+        ready_count = session.chunks.filter(status=VideoChunk.Status.READY).count()
         user_prompt = (
             f"Video title: {session.title or session.page_title or 'Untitled'}\n"
             f"Duration: {session.duration_seconds or 'unknown'}s\n"
-            f"Total chunks processed: {session.chunks.filter(status='ready').count()}\n\n"
+            f"Total chunks processed: {ready_count}\n\n"
+            f"Requested workflow: {workflow_template}\n"
+            f"Workflow requirements: {workflow_instruction}\n\n"
             f"Per-chunk blocks (in order):\n{blocks_json}\n\n"
             f"Timeline moments:\n{timeline_json}"
         )
 
         system_prompt = (
             "You are a document synthesis agent. Given per-chunk reading blocks from a video, "
-            "produce a single unified document. Deduplicate overlapping content, maintain chronological order, "
-            "create proper section headings, and ensure continuity. Preserve all code, examples, "
+            "produce a single unified workflow-specific artifact. Deduplicate overlapping content, maintain chronological order, "
+            "create useful section headings, and ensure continuity. Preserve all code, examples, "
             "diagrams, and teaching flow. Do not summarize away details.\n\n"
             "Return JSON with keys: title, sections, summary.\n"
-            "sections is a list of objects with: heading, body, start_seconds, end_seconds, kind.\n"
+            "sections is a list of objects with: heading, body, start_seconds, end_seconds, kind. "
+            "Use section kinds that fit the requested workflow, such as finding, cue, step, code, decision, claim, terminology, or explanation.\n"
             "summary is a 2-3 sentence overview of the entire video."
         )
 
-        emit_event(session, "session.synthesizing", {"block_count": len(blocks)})
+        emit_event(session, "session.synthesizing", {"block_count": len(blocks), "workflow_template": workflow_template})
         result = self.qwen.text_json(
             model=settings.QWEN_FINAL_MODEL,
             system_prompt=system_prompt,
@@ -298,7 +365,7 @@ class AgentSocietyRunner:
             fallback_models=settings.QWEN_FINAL_FALLBACK_MODELS,
         )
 
-        emit_event(session, "session.synthesized", {"latency_ms": result.latency_ms})
+        emit_event(session, "session.synthesized", {"latency_ms": result.latency_ms, "workflow_template": workflow_template})
         return result.content
 
     def _fallback_blocks_from_outputs(self, chunk: VideoChunk, prior_outputs: list[dict[str, Any]]) -> list[dict[str, Any]]:

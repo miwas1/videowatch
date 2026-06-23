@@ -147,7 +147,7 @@ def test_url_ingest_marks_session_ready_only_after_all_chunks(monkeypatch: pytes
 
     response = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).post(
         "/api/v1/ingest/from-url",
-        data={"url": "https://example.com/watch?v=two-chunks", "chunk_seconds": 30},
+        data={"url": "https://example.com/watch?v=two-chunks", "chunk_seconds": 30, "auto_synthesize": False},
         content_type="application/json",
     )
 
