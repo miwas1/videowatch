@@ -1,23 +1,10 @@
-name: Deploy to Alibaba Cloud
+name: Deploy to Alibaba Cloud ECS
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      deploy_backend:
-        description: Deploy the Django backend to ECS/Simple Application Server
-        type: boolean
-        default: true
-      deploy_web:
-        description: Deploy the Vite web app to OSS
-        type: boolean
-        default: true
-      delete_stale_web_assets:
-        description: Delete OSS files that are no longer in apps/web/dist
-        type: boolean
-        default: false
 
 concurrency:
   group: alibaba-production
@@ -29,8 +16,6 @@ permissions:
 env:
   NODE_VERSION: "24"
   PYTHON_VERSION: "3.12"
-  OSSUTIL_VERSION: "2.2.1"
-  OSSUTIL_LINUX_AMD64_SHA256: "fbf1026bd383a5d9bee051cd64a6226c730357ba569491f7c7b91af66560ef1d"
 
 jobs:
   ci:
@@ -51,14 +36,11 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Typecheck web app
-        run: npm run typecheck:web
-
-      - name: Test web app
-        run: npm run test:web
-
-      - name: Build web app
-        run: npm run build:web
+      - name: Verify web app
+        run: |
+          npm run typecheck:web
+          npm run test:web
+          npm run build:web
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
@@ -71,56 +53,52 @@ jobs:
         working-directory: backend
         run: uv python install "$PYTHON_VERSION"
 
-      - name: Check backend
+      - name: Verify backend
         working-directory: backend
-        run: uv run --frozen python manage.py check
+        run: |
+          uv run --frozen python manage.py check
+          uv run --frozen pytest
 
-      - name: Test backend
-        working-directory: backend
-        run: uv run --frozen pytest
-
-  deploy-backend:
-    name: Deploy backend to Alibaba Cloud server
+  deploy:
+    name: Deploy Compose stack to ECS
     runs-on: ubuntu-latest
     needs: ci
     environment: production
-    if: ${{ github.event_name == 'push' || inputs.deploy_backend }}
 
     env:
-      ALIBABA_BACKEND_HOST: ${{ secrets.ALIBABA_BACKEND_HOST }}
-      ALIBABA_BACKEND_SSH_USER: ${{ secrets.ALIBABA_BACKEND_SSH_USER }}
-      ALIBABA_BACKEND_SSH_PORT: ${{ secrets.ALIBABA_BACKEND_SSH_PORT }}
-      ALIBABA_BACKEND_SSH_KEY: ${{ secrets.ALIBABA_BACKEND_SSH_KEY }}
-      ALIBABA_BACKEND_APP_DIR: ${{ secrets.ALIBABA_BACKEND_APP_DIR }}
-      ALIBABA_BACKEND_SERVICE: ${{ secrets.ALIBABA_BACKEND_SERVICE }}
-      ALIBABA_BACKEND_HEALTH_URL: ${{ secrets.ALIBABA_BACKEND_HEALTH_URL }}
+      ECS_HOST: ${{ secrets.ECS_HOST }}
+      ECS_SSH_USER: ${{ secrets.ECS_SSH_USER }}
+      ECS_SSH_PORT: ${{ secrets.ECS_SSH_PORT }}
+      ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
+      ECS_APP_DIR: ${{ secrets.ECS_APP_DIR }}
+      DEPLOY_HEALTH_URL: ${{ secrets.DEPLOY_HEALTH_URL }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Validate backend deployment secrets
+      - name: Validate deployment secrets
         run: |
           set -euo pipefail
-          test -n "$ALIBABA_BACKEND_HOST"
-          test -n "$ALIBABA_BACKEND_SSH_USER"
-          test -n "$ALIBABA_BACKEND_SSH_KEY"
+          test -n "$ECS_HOST"
+          test -n "$ECS_SSH_USER"
+          test -n "$ECS_SSH_KEY"
 
       - name: Configure SSH
         run: |
           set -euo pipefail
-          port="${ALIBABA_BACKEND_SSH_PORT:-22}"
+          port="${ECS_SSH_PORT:-22}"
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "$ALIBABA_BACKEND_SSH_KEY" > ~/.ssh/alibaba_deploy_key
-          chmod 600 ~/.ssh/alibaba_deploy_key
-          ssh-keyscan -p "$port" "$ALIBABA_BACKEND_HOST" >> ~/.ssh/known_hosts
+          printf '%s\n' "$ECS_SSH_KEY" > ~/.ssh/ecs_deploy_key
+          chmod 600 ~/.ssh/ecs_deploy_key
+          ssh-keyscan -p "$port" "$ECS_HOST" >> ~/.ssh/known_hosts
 
-      - name: Sync backend code to server
+      - name: Sync application to ECS
         run: |
           set -euo pipefail
-          port="${ALIBABA_BACKEND_SSH_PORT:-22}"
-          app_dir="${ALIBABA_BACKEND_APP_DIR:-/opt/describeops}"
+          port="${ECS_SSH_PORT:-22}"
+          app_dir="${ECS_APP_DIR:-/opt/describeops}"
 
           rsync -az --delete \
             --exclude='.git/' \
@@ -128,119 +106,35 @@ jobs:
             --exclude='.env' \
             --exclude='.env.*.local' \
             --exclude='node_modules/' \
-            --exclude='apps/*/node_modules/' \
-            --exclude='apps/web/dist/' \
-            --exclude='apps/extension/dist/' \
-            --exclude='backend/.env' \
+            --exclude='**/node_modules/' \
+            --exclude='**/dist/' \
             --exclude='backend/.venv/' \
             --exclude='backend/.pytest_cache/' \
             --exclude='backend/db.sqlite3' \
             --exclude='backend/media/' \
-            --exclude='backend/staticfiles/' \
+            --exclude='screenshots/' \
             --exclude='outputs/' \
-            -e "ssh -i ~/.ssh/alibaba_deploy_key -p ${port} -o StrictHostKeyChecking=yes" \
-            ./ "${ALIBABA_BACKEND_SSH_USER}@${ALIBABA_BACKEND_HOST}:${app_dir}/"
+            -e "ssh -i ~/.ssh/ecs_deploy_key -p ${port} -o StrictHostKeyChecking=yes" \
+            ./ "${ECS_SSH_USER}@${ECS_HOST}:${app_dir}/"
 
-      - name: Run backend release commands
+      - name: Rebuild and restart Compose stack
         run: |
           set -euo pipefail
-          port="${ALIBABA_BACKEND_SSH_PORT:-22}"
-          app_dir="${ALIBABA_BACKEND_APP_DIR:-/opt/describeops}"
-          service="${ALIBABA_BACKEND_SERVICE:-describeops}"
+          port="${ECS_SSH_PORT:-22}"
+          app_dir="${ECS_APP_DIR:-/opt/describeops}"
 
-          ssh -i ~/.ssh/alibaba_deploy_key -p "$port" -o StrictHostKeyChecking=yes \
-            "${ALIBABA_BACKEND_SSH_USER}@${ALIBABA_BACKEND_HOST}" \
-            "APP_DIR=${app_dir@Q} SERVICE=${service@Q} bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/ecs_deploy_key -p "$port" -o StrictHostKeyChecking=yes \
+            "${ECS_SSH_USER}@${ECS_HOST}" \
+            "APP_DIR=${app_dir@Q} bash -s" <<'REMOTE'
           set -euo pipefail
-          cd "$APP_DIR/backend"
-
-          uv sync --frozen --no-dev
-          uv run python manage.py check --deploy
-          uv run python manage.py migrate --noinput
-          uv run python manage.py collectstatic --noinput
-
-          sudo systemctl restart "$SERVICE"
-          sudo systemctl --no-pager --full status "$SERVICE"
+          cd "$APP_DIR"
+          test -f .env
+          docker compose --env-file .env config --quiet
+          docker compose --env-file .env up -d --build --remove-orphans
+          docker compose ps
           REMOTE
 
-      - name: Check backend health endpoint
-        if: ${{ env.ALIBABA_BACKEND_HEALTH_URL != '' }}
-        run: |
-          set -euo pipefail
-          curl -fsS --retry 5 --retry-delay 5 "$ALIBABA_BACKEND_HEALTH_URL"
+      - name: Check public health endpoint
+        if: ${{ env.DEPLOY_HEALTH_URL != '' }}
+        run: curl -fsS --retry 12 --retry-delay 5 --retry-all-errors "$DEPLOY_HEALTH_URL"
 
-  deploy-web:
-    name: Deploy web app to Alibaba Cloud OSS
-    runs-on: ubuntu-latest
-    needs: ci
-    environment: production
-    if: ${{ github.event_name == 'push' || inputs.deploy_web }}
-
-    env:
-      VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
-      VITE_API_TOKEN: ${{ secrets.VITE_API_TOKEN }}
-      OSS_ACCESS_KEY_ID: ${{ secrets.ALIBABA_OSS_ACCESS_KEY_ID }}
-      OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_OSS_ACCESS_KEY_SECRET }}
-      OSS_REGION: ${{ secrets.ALIBABA_OSS_REGION }}
-      OSS_ENDPOINT: ${{ secrets.ALIBABA_OSS_ENDPOINT }}
-      ALIBABA_OSS_BUCKET: ${{ secrets.ALIBABA_OSS_BUCKET }}
-      ALIBABA_OSS_PREFIX: ${{ secrets.ALIBABA_OSS_PREFIX }}
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Validate web deployment secrets
-        run: |
-          set -euo pipefail
-          test -n "$VITE_API_BASE_URL"
-          test -n "$VITE_API_TOKEN"
-          test -n "$OSS_ACCESS_KEY_ID"
-          test -n "$OSS_ACCESS_KEY_SECRET"
-          test -n "$OSS_REGION"
-          test -n "$OSS_ENDPOINT"
-          test -n "$ALIBABA_OSS_BUCKET"
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install Node dependencies
-        run: npm ci
-
-      - name: Build production web app
-        run: npm run build:web
-
-      - name: Install ossutil 2
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y unzip
-          curl -fsSL \
-            -o /tmp/ossutil.zip \
-            "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL_VERSION}/ossutil-${OSSUTIL_VERSION}-linux-amd64.zip"
-          echo "${OSSUTIL_LINUX_AMD64_SHA256}  /tmp/ossutil.zip" | sha256sum -c -
-          unzip -q /tmp/ossutil.zip -d /tmp/ossutil
-          sudo install -m 0755 "/tmp/ossutil/ossutil-${OSSUTIL_VERSION}-linux-amd64/ossutil" /usr/local/bin/ossutil
-          ossutil version
-
-      - name: Upload web app to OSS
-        run: |
-          set -euo pipefail
-          prefix="${ALIBABA_OSS_PREFIX#/}"
-          prefix="${prefix%/}"
-          if [[ -n "$prefix" ]]; then
-            destination="oss://${ALIBABA_OSS_BUCKET}/${prefix}/"
-          else
-            destination="oss://${ALIBABA_OSS_BUCKET}/"
-          fi
-
-          delete_flag=""
-          if [[ "${{ inputs.delete_stale_web_assets || false }}" == "true" ]]; then
-            delete_flag="--delete"
-          fi
-
-          ossutil sync apps/web/dist/ "$destination" -f $delete_flag

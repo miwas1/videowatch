@@ -1,0 +1,40 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	request_body {
+		max_size 30MB
+	}
+
+	handle_path /media/* {
+		root * /srv/media
+		file_server
+		header Cache-Control "private, max-age=3600"
+	}
+
+	handle_path /static/* {
+		root * /srv/static
+		file_server
+	}
+
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	handle /health {
+		reverse_proxy backend:8000
+	}
+
+	handle /admin* {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}

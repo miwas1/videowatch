@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import load_dotenv
 
@@ -77,13 +77,17 @@ def database_from_env() -> dict[str, object]:
     parsed = urlparse(url)
     if parsed.scheme not in {"postgres", "postgresql"}:
         raise RuntimeError("DATABASE_URL must use postgres:// or postgresql://")
+    query_options = {key: values[-1] for key, values in parse_qs(parsed.query).items() if values}
     return {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": parsed.path.lstrip("/"),
-        "USER": parsed.username or "",
-        "PASSWORD": parsed.password or "",
+        "NAME": unquote(parsed.path.lstrip("/")),
+        "USER": unquote(parsed.username or ""),
+        "PASSWORD": unquote(parsed.password or ""),
         "HOST": parsed.hostname or "",
         "PORT": str(parsed.port or 5432),
+        "OPTIONS": query_options,
+        "CONN_MAX_AGE": int(os.getenv("DATABASE_CONN_MAX_AGE", "60")),
+        "CONN_HEALTH_CHECKS": True,
     }
 
 
