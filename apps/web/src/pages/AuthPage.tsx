@@ -46,11 +46,26 @@ export function AuthPage({ onAuthenticated }: Props) {
             <span>Email</span>
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" required />
           </label>
-          <label>
-            <span>Password</span>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={8} aria-describedby="pw-hint" />
-            {mode === "register" && <span id="pw-hint" className="auth-form__hint">Minimum 8 characters</span>}
-          </label>
+          <div className="auth-form__field">
+            <label htmlFor="auth-password">
+              <span>Password</span>
+              <input
+                id="auth-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
+                required
+                minLength={8}
+                aria-describedby={mode === "register" ? "pw-hint" : undefined}
+              />
+            </label>
+            {mode === "register" && (
+              <span id="pw-hint" className="auth-form__hint">
+                Minimum 8 characters
+              </span>
+            )}
+          </div>
           <button className="btn btn--primary" type="submit" disabled={submitting || !email.trim() || password.length < 8}>
             {submitting ? "Working…" : mode === "login" ? <>Sign in <ArrowRightIcon aria-hidden="true" /></> : <>Create account <ArrowRightIcon aria-hidden="true" /></>}
           </button>

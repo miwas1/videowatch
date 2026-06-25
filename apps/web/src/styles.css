@@ -87,6 +87,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .auth-form label { display: grid; gap: 8px; color: var(--ink-muted); font: .65rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 .auth-form input { height: 52px; padding: 0 14px; border: 1px solid var(--ink); background: var(--surface); color: var(--ink); font: .95rem var(--font); text-transform: none; letter-spacing: 0; }
 .auth-form .btn { margin-top: 8px; }
+.auth-form__field { display: grid; gap: 4px; }
 .auth-form__error { color: var(--red); font-size: .82rem; }
 .auth-form__hint { color: var(--ink-faint); font-size: .62rem; }
 .auth-panel__switch { margin-top: 20px; border: 0; border-bottom: 1px solid var(--ink); background: transparent; color: var(--ink-muted); cursor: pointer; font: .68rem var(--font-mono); letter-spacing: .04em; text-transform: uppercase; }
