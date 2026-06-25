@@ -15,7 +15,7 @@ from PIL import Image
 from reader.models import ProcessingJob, ReadingBlock, TimelineMoment, UserApiToken, VideoChunk
 from reader.models import VideoSession
 from reader.services.jobs import run_next_job
-from reader.services.media_ingest import YouTubeAccessError
+from reader.services.media_ingest import YouTubeAccessError, is_youtube_access_error
 
 
 TOKEN = "test-token"
@@ -36,6 +36,12 @@ def png_frame() -> SimpleUploadedFile:
 def create_user_token(user, raw_token: str) -> str:
     UserApiToken.objects.create(user=user, token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest())
     return raw_token
+
+
+def test_youtube_access_error_detection_requires_access_gate_signal() -> None:
+    assert is_youtube_access_error("ERROR: [youtube] abc: Sign in to confirm you're not a bot")
+    assert is_youtube_access_error("ERROR: [youtube] abc: Use --cookies-from-browser or --cookies for authenticated access")
+    assert not is_youtube_access_error("ERROR: [youtube] abc: requested format is not available; see cookie docs for examples")
 
 
 class ImmediateRunner:

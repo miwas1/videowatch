@@ -31,6 +31,22 @@ class YouTubeAccessError(VideoIngestError):
     code = "youtube_access_required"
 
 
+YOUTUBE_ACCESS_ERROR_PATTERNS = (
+    "sign in to confirm",
+    "confirm you're not a bot",
+    "confirm you are not a bot",
+    "not a bot",
+    "login required",
+    "private video",
+    "members-only",
+    "members only",
+    "this video is unavailable",
+    "age-restricted",
+    "age restricted",
+    "use --cookies",
+    "use --cookies-from-browser",
+)
+
 ALLOWED_VIDEO_UPLOAD_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
@@ -42,6 +58,11 @@ def safe_slug(value: str, fallback: str = "video") -> str:
 
 def run_command(command: list[str]) -> None:
     subprocess.run(command, check=True, capture_output=True)
+
+
+def is_youtube_access_error(message: str) -> bool:
+    normalized = message.lower()
+    return any(pattern in normalized for pattern in YOUTUBE_ACCESS_ERROR_PATTERNS)
 
 
 def probe_duration(path: Path) -> float:
@@ -100,7 +121,7 @@ def download_youtube_video(url: str, work_dir: Path, *, max_height: int = 360) -
     except Exception as exc:
         message = str(exc)
         normalized = message.lower()
-        if "sign in to confirm" in normalized or "not a bot" in normalized or "cookies" in normalized:
+        if is_youtube_access_error(message):
             raise YouTubeAccessError(
                 "YouTube could not confirm this server is allowed to access the video. "
                 "Use the browser extension capture for this page, try another public video URL, "
