@@ -118,6 +118,25 @@ Create a GitHub `production` environment and add these secrets:
 
 The workflow at `.github/workflows/deploy-alibaba.yml` runs tests, synchronizes the repository without overwriting `.env`, rebuilds the Compose services, applies migrations, and checks the public health endpoint on every push to `main`. It can also be started manually with `workflow_dispatch`.
 
+## 6. View container logs without SSH
+
+The Compose stack includes Dozzle at `https://YOUR_DOMAIN/logs/`. Dozzle is a lightweight live Docker log viewer; it reads Docker logs through the host Docker socket and does not replace long-term log storage.
+
+Before deploying this route, set basic-auth credentials in `/opt/describeops/.env`:
+
+```bash
+docker run --rm caddy:2-alpine caddy hash-password --plaintext 'replace-with-strong-password'
+```
+
+Then add:
+
+```bash
+LOGS_BASIC_AUTH_USER=logs
+LOGS_BASIC_AUTH_HASH='$2a$14$replace-with-caddy-bcrypt-hash'
+```
+
+Keep Dozzle behind authentication. It mounts `/var/run/docker.sock` read-only, but anyone who can access the log UI can still view application logs and metadata for every container in the stack.
+
 ## Operations
 
 View status and logs:

@@ -32,6 +32,13 @@
 		reverse_proxy backend:8000
 	}
 
+	handle /logs* {
+		basic_auth {
+			{$LOGS_BASIC_AUTH_USER} {$LOGS_BASIC_AUTH_HASH}
+		}
+		reverse_proxy dozzle:8080
+	}
+
 	handle {
 		root * /srv/web
 		try_files {path} /index.html

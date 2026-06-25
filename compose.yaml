@@ -45,9 +45,13 @@ services:
     environment:
       DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
       ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+      LOGS_BASIC_AUTH_USER: ${LOGS_BASIC_AUTH_USER:-logs}
+      LOGS_BASIC_AUTH_HASH: ${LOGS_BASIC_AUTH_HASH:-$$2b$$14$$13b53w8I8wpJ2NBO1ex/BeligGAitYp1sUheFLoDk.vzfsC9qcpD6}
     depends_on:
       backend:
         condition: service_healthy
+      dozzle:
+        condition: service_started
     ports:
       - "80:80"
       - "443:443"
@@ -59,9 +63,22 @@ services:
       - caddy_config:/config
     restart: unless-stopped
 
+  dozzle:
+    image: amir20/dozzle:latest
+    command:
+      - --base
+      - /logs
+      - --no-analytics
+    expose:
+      - "8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - dozzle_data:/data
+    restart: unless-stopped
+
 volumes:
   media:
   static:
   caddy_data:
   caddy_config:
-
+  dozzle_data:
