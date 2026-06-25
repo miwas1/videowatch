@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowRightIcon, CheckIcon, Link2Icon, UploadIcon } from "@radix-ui/react-icons";
+import { ArrowRightIcon, CheckIcon, DownloadIcon, Link2Icon, UploadIcon } from "@radix-ui/react-icons";
 import { PresetRail } from "@/components/PresetRail";
 import { api } from "@/api/client";
 import { useHealth } from "@/hooks/useHealth";
@@ -12,6 +12,8 @@ type Props = {
   onSessionStarted: (sessionId: string, workflowTemplate: string) => void;
   onOpenSession: (sessionId: string, workflowTemplate: string, destination: "processing" | "review") => void;
 };
+
+const EXTENSION_DOWNLOAD_PATH = "/downloads/describeops-extension.zip";
 
 export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSession }: Props) {
   const [url, setUrl] = useState("");
@@ -113,6 +115,10 @@ export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSessio
     }, 550);
   }
 
+  function scrollToInstall() {
+    document.querySelector("#install-extension")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   return (
     <main className="home-page">
       <header className="site-header">
@@ -121,6 +127,7 @@ export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSessio
         </a>
         <nav className="site-header__nav" aria-label="Primary navigation">
           <a href="#workspace">Workspace</a>
+          <a href="#install-extension">Extension</a>
           <a href="#workflows">Workflows</a>
           <a href="#how-it-works">How it works</a>
         </nav>
@@ -129,7 +136,7 @@ export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSessio
             <span className={`health-dot ${checking ? "health-dot--unknown" : health?.ok ? "health-dot--ok" : "health-dot--error"}`} />
             <span>{checking ? "Checking" : health?.ok ? "System online" : "Offline"}</span>
           </div>
-          <button className="btn btn--dark site-header__cta" type="button" onClick={scrollToWorkspace}>Start a check</button>
+          <button className="btn btn--dark site-header__cta" type="button" onClick={scrollToInstall}>Install extension</button>
           <div className="site-header__account" title={currentUser.email}>
             <span>{currentUser.email}</span>
             <button type="button" onClick={onLogout}>Sign out</button>
@@ -146,9 +153,14 @@ export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSessio
         <p className="landing-hero__copy hero-reveal hero-reveal--3">
           DescribeOps turns complex video into structured reading, audio-description scripts, and accessibility evidence.
         </p>
-        <button className="landing-hero__link hero-reveal hero-reveal--4" type="button" onClick={scrollToWorkspace}>
-          Check a video <ArrowRightIcon aria-hidden="true" />
-        </button>
+        <div className="landing-hero__actions hero-reveal hero-reveal--4">
+          <button className="landing-hero__link" type="button" onClick={scrollToWorkspace}>
+            Check a video <ArrowRightIcon aria-hidden="true" />
+          </button>
+          <button className="landing-hero__link" type="button" onClick={scrollToInstall}>
+            Install extension <DownloadIcon aria-hidden="true" />
+          </button>
+        </div>
 
         <div className="landing-hero__signal" aria-hidden="true">
           <div className="signal-frame signal-frame--one"><span>VISUAL</span><b>01</b></div>
@@ -230,10 +242,34 @@ export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSessio
               <p className="ingest-form__label">Browser capture</p>
               <h3>Use this for private, logged-in, embedded, or social videos.</h3>
               <p>Open the video where you normally watch it, launch the DescribeOps extension, choose this workflow, and send captured chunks to your workspace.</p>
-              <a className="btn btn--secondary" href="#how-it-works">See capture flow <ArrowRightIcon aria-hidden="true" /></a>
+              <div className="capture-callout__actions">
+                <a className="btn btn--primary" href={EXTENSION_DOWNLOAD_PATH} download>
+                  Download extension <DownloadIcon aria-hidden="true" />
+                </a>
+                <a className="btn btn--secondary" href="#install-extension">Install steps <ArrowRightIcon aria-hidden="true" /></a>
+              </div>
             </div>
           )}
         </div>
+      </section>
+
+      <section className="extension-section" id="install-extension">
+        <div className="extension-section__intro">
+          <p className="section-kicker">Browser extension</p>
+          <h2>Capture what the server<br /><em>cannot fetch.</em></h2>
+          <p>Use the extension for logged-in videos, live streams, course portals, private embeds, and pages that block backend downloads.</p>
+          <a className="btn btn--primary extension-download" href={EXTENSION_DOWNLOAD_PATH} download>
+            <DownloadIcon aria-hidden="true" />
+            Download Chrome extension
+          </a>
+        </div>
+
+        <ol className="extension-steps" aria-label="Extension install steps">
+          <li><span>01</span><div><strong>Download</strong><p>Save the DescribeOps extension zip from this site.</p></div></li>
+          <li><span>02</span><div><strong>Unzip</strong><p>Extract the folder somewhere stable on your computer.</p></div></li>
+          <li><span>03</span><div><strong>Load unpacked</strong><p>Open Chrome extensions, enable Developer mode, then choose the extracted folder.</p></div></li>
+          <li><span>04</span><div><strong>Pin</strong><p>Pin DescribeOps, open a video page, and start browser capture.</p></div></li>
+        </ol>
       </section>
 
       <section className="workflows-section" id="workflows" aria-label="Choose workflow preset">

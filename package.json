@@ -8,8 +8,9 @@
   "scripts": {
     "build": "vite build apps/extension",
     "build:extension": "vite build apps/extension",
-    "build:web": "npm run build -w @describeops/web",
+    "build:web": "npm run package:extension && npm run build -w @describeops/web",
     "dev:web": "npm run dev -w @describeops/web",
+    "package:extension": "npm run build:extension && node scripts/package-extension.mjs",
     "typecheck": "tsc -p apps/extension/tsconfig.json --noEmit",
     "typecheck:web": "tsc -p apps/web/tsconfig.json --noEmit",
     "test": "npm run test:web",

@@ -74,6 +74,26 @@ class ImmediateRunner:
         return {"blocks": [block], "timeline": [moment]}
 
 
+class ChunkReadyRunner:
+    def process_chunk(self, chunk: VideoChunk) -> dict[str, Any]:
+        chunk.status = VideoChunk.Status.READY
+        chunk.latency_ms = 25
+        chunk.save(update_fields=["status", "latency_ms", "updated_at"])
+        ReadingBlock.objects.create(
+            session=chunk.session,
+            chunk=chunk,
+            order=0,
+            kind=ReadingBlock.Kind.VISUAL_CONTEXT,
+            heading="Live frame",
+            body="The live stream displays current visual context.",
+            start_seconds=chunk.start_seconds,
+            end_seconds=chunk.end_seconds,
+            source_evidence=["live frame"],
+            confidence=0.8,
+        )
+        return {}
+
+
 @pytest.mark.django_db
 @override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
 def test_register_issues_account_token_and_me_returns_user() -> None:
@@ -247,6 +267,46 @@ def test_url_ingest_classifies_youtube_access_failures(monkeypatch: pytest.Monke
     assert progress["status"] == "failed"
     assert progress["ingest_error_code"] == "youtube_access_required"
     assert progress["error_message"] == "YouTube blocked the server download."
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_live_session_stays_open_until_finished(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("reader.services.agents.AgentSocietyRunner", lambda: ChunkReadyRunner())
+    client = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN)
+    session = VideoSession.objects.create(
+        source_url="live://browser-tab",
+        title="Live webinar",
+        status=VideoSession.Status.PROCESSING,
+        pipeline_stage=VideoSession.PipelineStage.ANALYZING,
+        settings={"source_type": "live_capture", "live_status": "recording"},
+    )
+
+    response = client.post(
+        f"/api/v1/sessions/{session.id}/chunks/async",
+        data={
+            "chunk_index": "0",
+            "start_seconds": "0",
+            "end_seconds": "15",
+            "frames": [png_frame()],
+        },
+    )
+
+    assert response.status_code == 202
+    run_next_job()
+    session.refresh_from_db()
+    assert session.status == VideoSession.Status.PROCESSING
+    assert session.pipeline_stage == VideoSession.PipelineStage.ANALYZING
+
+    finish_response = client.post(f"/api/v1/sessions/{session.id}/live/finish", data={}, content_type="application/json")
+
+    assert finish_response.status_code == 202
+    session.refresh_from_db()
+    assert session.status == VideoSession.Status.READY
+    assert session.pipeline_stage == VideoSession.PipelineStage.READY
+    assert session.expected_chunk_count == 1
+    assert session.duration_seconds == 15
+    assert session.settings["live_status"] == "stopped"
 
 
 @pytest.mark.django_db

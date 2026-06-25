@@ -39,6 +39,29 @@ export class DescribeOpsApi {
     });
   }
 
+  async createLiveSession(snapshot: PageAccessibilitySnapshot, mediaId: string): Promise<SessionResponse> {
+    const media = snapshot.media.find((item) => item.id === mediaId) ?? snapshot.media[0];
+    return this.requestJson<SessionResponse>("/api/v1/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        source_url: media?.source || snapshot.url || "live://browser-tab",
+        title: media?.label || snapshot.title || "Live stream",
+        page_title: snapshot.title,
+        duration_seconds: null,
+        settings: {
+          extension_version: "0.1.0",
+          platform: snapshot.platform,
+          media_id: media?.id,
+          media_kind: media?.kind,
+          capture_mode: "browser_extension_live",
+          source_type: "live_capture",
+          live_status: "recording",
+          chunk_seconds: this.settings.chunkSeconds
+        }
+      })
+    });
+  }
+
   async uploadChunk(params: {
     sessionId: string;
     chunkIndex: number;
@@ -116,6 +139,13 @@ export class DescribeOpsApi {
       method: "POST",
       body: JSON.stringify({})
     });
+  }
+
+  async finishLiveSession(sessionId: string): Promise<{ session_id: string; status: string; total_chunks: number; ready_chunks: number; failed_chunks: number }> {
+    return this.requestJson<{ session_id: string; status: string; total_chunks: number; ready_chunks: number; failed_chunks: number }>(
+      `/api/v1/sessions/${sessionId}/live/finish`,
+      { method: "POST", body: JSON.stringify({}) }
+    );
   }
 
   async exportMarkdown(sessionId: string): Promise<string> {

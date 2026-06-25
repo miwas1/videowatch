@@ -38,6 +38,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.name === "CAPTURE_LIVE_FRAMES_REQUESTED") {
+    captureLiveFrames(
+      String(message.mediaId ?? ""),
+      Number(message.durationSeconds ?? 30),
+      Number(message.frameCount ?? 4)
+    )
+      .then((payload) => sendResponse({ ok: true, payload }))
+      .catch((error) => sendResponse({ ok: false, message: "Live frame capture failed.", diagnostics: String(error) }));
+    return true;
+  }
+
   if (message?.name === "DESCRIPTIONS_ATTACH_REQUESTED") {
     const result = attachDescriptions(String(message.mediaId ?? ""), Array.isArray(message.cues) ? message.cues : []);
     sendResponse(result);
@@ -129,6 +140,39 @@ async function captureMultiFrames(
   }
 
   return frames.length > 0 ? frames : [fallbackFrame(mediaId, startSeconds, "All frame captures failed.")];
+}
+
+async function captureLiveFrames(
+  mediaId: string,
+  durationSeconds: number,
+  frameCount: number
+): Promise<CapturedFrame[]> {
+  const media = findMediaElement(mediaId);
+  const frames: CapturedFrame[] = [];
+  const safeFrameCount = Math.max(1, frameCount);
+  const safeDurationMs = Math.max(1000, durationSeconds * 1000);
+  const intervalMs = safeFrameCount > 1 ? safeDurationMs / (safeFrameCount - 1) : safeDurationMs;
+
+  for (let index = 0; index < safeFrameCount; index++) {
+    if (index > 0) await delay(intervalMs);
+    const timestamp = media?.currentTime ?? index * (durationSeconds / safeFrameCount);
+    if (media instanceof HTMLVideoElement && media.videoWidth > 0) {
+      try {
+        frames.push(await captureFrameAtCurrentTime(media, mediaId, timestamp));
+        continue;
+      } catch {
+        frames.push(fallbackFrame(mediaId, timestamp, `Live frame ${index + 1} used page context fallback.`));
+        continue;
+      }
+    }
+    frames.push(fallbackFrame(mediaId, timestamp, `Live frame ${index + 1} used page context fallback.`));
+  }
+
+  return frames.length > 0 ? frames : [fallbackFrame(mediaId, 0, "No live frames were captured.")];
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function seekTo(media: HTMLVideoElement, time: number): Promise<void> {

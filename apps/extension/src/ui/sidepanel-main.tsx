@@ -51,11 +51,14 @@ function SidePanel() {
   const [urlInput, setUrlInput] = useState("");
   const [capturedRanges, setCapturedRanges] = useState<CapturedRange[]>([]);
   const [autoCapturing, setAutoCapturing] = useState(false);
+  const [liveCapturing, setLiveCapturing] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptResponse | null>(null);
   const [progressText, setProgressText] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const autoCaptureRef = useRef(false);
   const autoStartedRef = useRef(false);
+  const liveCaptureRef = useRef(false);
+  const liveStartedAtRef = useRef<number | null>(null);
   const chunkIndexRef = useRef(0);
   const selectedMediaIdRef = useRef("");
   const sessionRef = useRef<SessionResponse | null>(null);
@@ -83,6 +86,10 @@ function SidePanel() {
   useEffect(() => {
     autoCaptureRef.current = autoCapturing;
   }, [autoCapturing]);
+
+  useEffect(() => {
+    liveCaptureRef.current = liveCapturing;
+  }, [liveCapturing]);
 
   useEffect(() => {
     chunkIndexRef.current = chunkIndex;
@@ -220,6 +227,23 @@ function SidePanel() {
     sessionRef.current = created;
     setSession(created);
     setStatus("Session created. Ready to capture.");
+    return created;
+  }
+
+  async function createLiveSession(nextSnapshot = snapshotRef.current, media = mediaFromSnapshot(nextSnapshot)) {
+    if (!api || !nextSnapshot || !media) return null;
+    const current = sessionRef.current;
+    if (current?.settings?.source_type === "live_capture" && current.settings.live_status === "recording") return current;
+    setStage("session");
+    setStatus("Starting a live DescribeOps session.");
+    const created = await api.createLiveSession(nextSnapshot, media.id);
+    sessionRef.current = created;
+    setSession(created);
+    setDocumentPayload(null);
+    setCapturedRanges([]);
+    setChunkIndex(0);
+    chunkIndexRef.current = 0;
+    setStatus("Live session started.");
     return created;
   }
 
@@ -364,6 +388,137 @@ function SidePanel() {
         setAutoCapturing(false);
       }
     }
+  }
+
+  async function startLiveCapture() {
+    if (!api) return;
+    setError("");
+    setLiveCapturing(true);
+    liveCaptureRef.current = true;
+    liveStartedAtRef.current = Date.now();
+    startTimer();
+    try {
+      let activeSnapshot = snapshotRef.current;
+      if (!activeSnapshot) {
+        const response = await chrome.runtime.sendMessage({ name: "PAGE_SCAN_REQUESTED" }) as RuntimeResponse<PageAccessibilitySnapshot>;
+        if (!response.ok) {
+          fail("Could not scan the active tab.", response.message);
+          return;
+        }
+        activeSnapshot = response.payload;
+        snapshotRef.current = activeSnapshot;
+        setSnapshot(activeSnapshot);
+      }
+
+      let media = mediaFromSnapshot(activeSnapshot);
+      if (!media) {
+        fail("Live capture needs a playable video.", "Start playback on the stream, then scan again.");
+        return;
+      }
+      selectedMediaIdRef.current = media.id;
+      setSelectedMediaId(media.id);
+
+      const activeSession = await createLiveSession(activeSnapshot, media);
+      if (!activeSession) return;
+
+      const chunkSeconds = settings?.chunkSeconds ?? 30;
+      const frameCount = settings?.framesPerChunk ?? 4;
+      setStage("upload");
+      setStatus("Live capture running. DescribeOps will add chunks until you stop.");
+
+      while (liveCaptureRef.current) {
+        const chunkStart = liveElapsedSeconds();
+        const activeChunkIndex = chunkIndexRef.current;
+        setProgressText(`Sampling live chunk ${activeChunkIndex + 1}...`);
+
+        const frameResponse = await chrome.runtime.sendMessage({
+          name: "CAPTURE_LIVE_FRAMES_REQUESTED",
+          mediaId: selectedMediaIdRef.current,
+          durationSeconds: chunkSeconds,
+          frameCount
+        }) as RuntimeResponse<CapturedFrame[]>;
+
+        if (!frameResponse.ok) {
+          fail("Live frame capture failed.", frameResponse.message);
+          return;
+        }
+
+        const scanResponse = await chrome.runtime.sendMessage({ name: "PAGE_SCAN_REQUESTED" }) as RuntimeResponse<PageAccessibilitySnapshot>;
+        if (scanResponse.ok) {
+          activeSnapshot = scanResponse.payload;
+          snapshotRef.current = activeSnapshot;
+          setSnapshot(activeSnapshot);
+          media = mediaFromSnapshot(activeSnapshot) ?? media;
+        }
+
+        const chunkEnd = Math.max(chunkStart + 1, liveElapsedSeconds());
+        setStatus(`Uploading live chunk ${activeChunkIndex + 1}: ${formatClock(chunkStart)} to ${formatClock(chunkEnd)}.`);
+        await api.uploadChunkAsync({
+          sessionId: activeSession.id,
+          chunkIndex: activeChunkIndex,
+          startSeconds: chunkStart,
+          endSeconds: chunkEnd,
+          transcriptText: transcriptFromSnapshot(activeSnapshot),
+          captureNotes: `${captureNotes(activeSnapshot, media, frameResponse.payload[0])}\nCapture mode: live stream`,
+          frames: frameResponse.payload
+        });
+
+        const newRange: CapturedRange = { start: chunkStart, end: chunkEnd, chunkIndex: activeChunkIndex };
+        setCapturedRanges((prev) => [...prev, newRange]);
+        chunkIndexRef.current = activeChunkIndex + 1;
+        setChunkIndex(chunkIndexRef.current);
+        setStatus(`Live chunk ${activeChunkIndex + 1} queued. Continuing capture.`);
+      }
+    } catch (caught) {
+      fail("Live capture failed.", String(caught));
+    } finally {
+      setLiveCapturing(false);
+      liveCaptureRef.current = false;
+      setProgressText("");
+      if (sessionRef.current?.settings?.source_type === "live_capture" && sessionRef.current.settings.live_status === "recording") {
+        await finalizeLiveSession();
+      }
+    }
+  }
+
+  async function stopLiveCapture() {
+    liveCaptureRef.current = false;
+    setLiveCapturing(false);
+    setStatus("Stopping live capture after the current sample.");
+  }
+
+  async function finalizeLiveSession() {
+    stopTimer();
+    setProgressText("");
+    const liveSession = sessionRef.current;
+    if (!api || !liveSession) {
+      setStatus("Live capture stopped.");
+      return;
+    }
+    try {
+      setStage("upload");
+      setStatus("Finalizing live session.");
+      const result = await api.finishLiveSession(liveSession.id);
+      const nextSession = await api.getSessionStatus(liveSession.id);
+      setSession(nextSession);
+      sessionRef.current = nextSession;
+      if (result.status === "ready") {
+        const nextDocument = await api.getDocument(liveSession.id);
+        setDocumentPayload(nextDocument);
+        setStage("review");
+        setStatus(`Live capture ready with ${result.ready_chunks} analyzed chunks.`);
+      } else {
+        setStatus(`Live capture stopped. ${result.ready_chunks}/${result.total_chunks} chunks are ready.`);
+        pollForCompletion(liveSession.id);
+      }
+    } catch (caught) {
+      fail("Could not finalize live capture.", String(caught));
+    }
+  }
+
+  function liveElapsedSeconds(): number {
+    const startedAt = liveStartedAtRef.current ?? Date.now();
+    return Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
   }
 
   async function synthesizeSession(sessionId: string | undefined) {
@@ -616,13 +771,24 @@ function SidePanel() {
               <PlayIcon aria-hidden="true" />
               Capture
             </button>
+            {liveCapturing ? (
+              <button type="button" className="button danger" onClick={stopLiveCapture}>
+                <StopIcon aria-hidden="true" />
+                Stop live
+              </button>
+            ) : (
+              <button type="button" className="button accent" onClick={startLiveCapture} disabled={!api || !focusedMedia || (isBusy(stage) && !liveCapturing) || autoCapturing}>
+                <TimerIcon aria-hidden="true" />
+                Live
+              </button>
+            )}
             {autoCapturing ? (
               <button type="button" className="button danger" onClick={stopAutoCapture}>
                 <StopIcon aria-hidden="true" />
                 Stop auto
               </button>
             ) : (
-              <button type="button" className="button accent" onClick={startAutoCapture} disabled={!api || !focusedMedia || isBusy(stage)}>
+              <button type="button" className="button accent" onClick={startAutoCapture} disabled={!api || !focusedMedia || isBusy(stage) || liveCapturing}>
                 <TimerIcon aria-hidden="true" />
                 Auto
               </button>

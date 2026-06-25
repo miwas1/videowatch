@@ -14,6 +14,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 apps/extension/dist/
+apps/web/public/downloads/*.zip
 apps/desktop-companion/dist/
 apps/desktop-companion/src-tauri/target/
 
