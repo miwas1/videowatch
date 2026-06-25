@@ -22,6 +22,14 @@ class DownloadedVideo:
     subtitle_paths: list[Path]
 
 
+class VideoIngestError(RuntimeError):
+    code = "video_ingest_failed"
+
+
+class YouTubeAccessError(VideoIngestError):
+    code = "youtube_access_required"
+
+
 def safe_slug(value: str, fallback: str = "video") -> str:
     cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-")
     cleaned = "-".join(part for part in cleaned.split("-") if part)
@@ -70,14 +78,36 @@ def download_youtube_video(url: str, work_dir: Path, *, max_height: int = 360) -
         "writeautomaticsub": True,
         "subtitleslangs": ["en", "en.*"],
         "subtitlesformat": "vtt",
+        "js_runtimes": {"deno": {}},
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if info is None:
-            raise RuntimeError("yt-dlp returned no metadata.")
-        video_path = Path(ydl.prepare_filename(info))
-        if video_path.suffix != ".mp4" and video_path.with_suffix(".mp4").exists():
-            video_path = video_path.with_suffix(".mp4")
+    cookie_file = getattr(settings, "DESCRIBEOPS_YTDLP_COOKIE_FILE", "")
+    if cookie_file:
+        cookie_path = Path(cookie_file)
+        if cookie_path.exists():
+            ydl_opts["cookiefile"] = str(cookie_path)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                raise RuntimeError("yt-dlp returned no metadata.")
+            video_path = Path(ydl.prepare_filename(info))
+            if video_path.suffix != ".mp4" and video_path.with_suffix(".mp4").exists():
+                video_path = video_path.with_suffix(".mp4")
+    except Exception as exc:
+        message = str(exc)
+        normalized = message.lower()
+        if "sign in to confirm" in normalized or "not a bot" in normalized or "cookies" in normalized:
+            raise YouTubeAccessError(
+                "YouTube could not confirm this server is allowed to access the video. "
+                "Use the browser extension capture for this page, try another public video URL, "
+                "or configure DESCRIBEOPS_YTDLP_COOKIE_FILE on the backend with an authorized cookies.txt file."
+            ) from exc
+        if "javascript runtime" in normalized or "js runtime" in normalized:
+            raise YouTubeAccessError(
+                "YouTube requires a JavaScript runtime for this video. The production backend image now includes Deno; "
+                "rebuild and redeploy the backend, then retry the job."
+            ) from exc
+        raise
     if not video_path.exists():
         candidates = sorted(work_dir.glob(f"{info.get('id', '*')}.*"))
         candidates = [path for path in candidates if path.suffix.lower() in {".mp4", ".webm", ".mkv"}]

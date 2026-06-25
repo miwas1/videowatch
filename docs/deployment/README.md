@@ -84,6 +84,7 @@ Edit `.env` and set at minimum:
 - `DATABASE_URL` to the pooled Neon URL.
 - `DASHSCOPE_API_KEY`.
 - Matching values for `DESCRIBEOPS_API_TOKEN` and `VITE_API_TOKEN`.
+- Optional `DESCRIBEOPS_YTDLP_COOKIE_FILE` when you need the backend to ingest YouTube videos you own or are authorized to access. Mount a Netscape `cookies.txt` file into the backend container and set this to that in-container path.
 
 `VITE_API_TOKEN` is compiled into browser JavaScript, so it must not be treated as a confidential credential. It is only a shared application gate.
 

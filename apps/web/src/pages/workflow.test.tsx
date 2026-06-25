@@ -24,6 +24,7 @@ const failedProgress = {
   last_event_type: "session.error",
   error_message: "Final synthesis unavailable",
   synthesis_error: "Final synthesis unavailable",
+  ingest_error_code: "",
 };
 
 describe("processing and review workflows", () => {
@@ -42,6 +43,28 @@ describe("processing and review workflows", () => {
     await userEvent.click(screen.getByRole("button", { name: "Retry synthesis" }));
     await waitFor(() => expect(api.retrySynthesis).toHaveBeenCalledWith("session-1", "research_digest"));
     expect(retry).toHaveBeenCalled();
+  });
+
+  it("explains YouTube access failures with recovery steps", () => {
+    const retry = vi.fn();
+    vi.mocked(usePollingProgress).mockReturnValue({
+      progress: {
+        ...failedProgress,
+        ready_chunks: 0,
+        artifact_required: false,
+        error_message: "YouTube could not confirm this server is allowed to access the video.",
+        synthesis_error: "",
+        ingest_error_code: "youtube_access_required",
+      },
+      error: null,
+      retry,
+    });
+
+    render(<ProcessingPage sessionId="session-1" workflowTemplate="reading_document" onReady={() => undefined} onBack={() => undefined} />);
+
+    expect(screen.getByRole("heading", { name: "YouTube blocked the server download." })).toBeTruthy();
+    expect(screen.getByText("Open the video in your browser and capture it with the DescribeOps extension.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry synthesis" })).toBeNull();
   });
 
   it("shows the generated artifact before generic source blocks", async () => {

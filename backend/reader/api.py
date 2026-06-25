@@ -44,6 +44,7 @@ from reader.services.export import export_reading_document_markdown
 from reader.services.qwen import QwenConfigurationError, QwenResponseError
 from reader.services.storage import FrameValidationError, save_uploaded_frame
 from reader.services.media_ingest import (
+    YouTubeAccessError,
     attach_frame_file,
     download_youtube_video,
     extract_frames_for_chunk,
@@ -105,6 +106,15 @@ def fail_session(session: VideoSession, detail: str, *, synthesis: bool = False)
         session.synthesis_error = detail
     session.save(update_fields=["status", "pipeline_stage", "error_message", "synthesis_error", "updated_at"])
     emit_event(session, "session.error", {"session_id": str(session.id), "detail": detail})
+
+
+def fail_ingest_session(session: VideoSession, exc: Exception) -> None:
+    settings_payload = dict(session.settings or {})
+    if isinstance(exc, YouTubeAccessError):
+        settings_payload["ingest_error_code"] = exc.code
+        session.settings = settings_payload
+        session.save(update_fields=["settings", "updated_at"])
+    fail_session(session, str(exc))
 
 
 def artifact_schema(artifact: GeneratedArtifact) -> ArtifactResponse:
@@ -347,6 +357,7 @@ def get_session_progress(request: HttpRequest, session_id: UUID) -> SessionProgr
         last_event_type=last_event.event_type if last_event else "",
         error_message=session.error_message,
         synthesis_error=session.synthesis_error,
+        ingest_error_code=str(session.settings.get("ingest_error_code", "")),
     )
 
 
@@ -726,14 +737,13 @@ def create_session_from_url(request: HttpRequest, payload: UrlProcessRequest) ->
                     session.save(update_fields=["status", "pipeline_stage", "updated_at"])
                     emit_event(session, "session.ready", {"session_id": str(session.id)})
         except Exception as exc:
-            fail_session(
-                session,
-                str(exc),
-                synthesis=session.pipeline_stage in {
-                    VideoSession.PipelineStage.SYNTHESIZING,
-                    VideoSession.PipelineStage.BUILDING_ARTIFACTS,
-                },
-            )
+            if session.pipeline_stage in {
+                VideoSession.PipelineStage.SYNTHESIZING,
+                VideoSession.PipelineStage.BUILDING_ARTIFACTS,
+            }:
+                fail_session(session, str(exc), synthesis=True)
+            else:
+                fail_ingest_session(session, exc)
         finally:
             connection.close()
 

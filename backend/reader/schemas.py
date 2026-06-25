@@ -157,6 +157,7 @@ class SessionProgressResponse(Schema):
     last_event_type: str
     error_message: str
     synthesis_error: str
+    ingest_error_code: str = ""
 
 
 class ArtifactResponse(Schema):

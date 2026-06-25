@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ProcessingView } from "@/components/ProcessingView";
 import { usePollingProgress } from "@/hooks/usePollingProgress";
 import { api } from "@/api/client";
+import type { SessionProgress } from "@/api/types";
 
 type Props = {
   sessionId: string;
@@ -34,16 +35,23 @@ export function ProcessingPage({ sessionId, workflowTemplate, onReady, onBack }:
     }
   }
 
+  const failure = describeFailure(progress);
+
   return (
     <main className="processing-page">
       <button className="btn btn--ghost processing-page__back" type="button" onClick={onBack}>
         ← Back
       </button>
       {progress?.status === "failed" ? (
-        <section className="processing-failure" role="alert">
-          <p className="processing-failure__eyebrow">Processing stopped</p>
-          <h1>We could not finish this output.</h1>
-          <p>{progress.synthesis_error || progress.error_message || "The backend reported an unknown processing error."}</p>
+        <section className={`processing-failure ${failure.kind === "youtube" ? "processing-failure--youtube" : ""}`} role="alert">
+          <p className="processing-failure__eyebrow">{failure.eyebrow}</p>
+          <h1>{failure.title}</h1>
+          <p>{failure.body}</p>
+          {failure.steps.length > 0 && (
+            <ol className="processing-failure__steps">
+              {failure.steps.map((step) => <li key={step}>{step}</li>)}
+            </ol>
+          )}
           <div className="processing-failure__actions">
             {progress.ready_chunks > 0 && progress.failed_chunks === 0 && (
               <button className="btn btn--primary" type="button" onClick={() => void retrySynthesis()} disabled={retrying}>
@@ -62,4 +70,33 @@ export function ProcessingPage({ sessionId, workflowTemplate, onReady, onBack }:
       )}
     </main>
   );
+}
+
+function describeFailure(progress: SessionProgress | null) {
+  const rawMessage = progress?.synthesis_error || progress?.error_message || "";
+  const isYoutubeAccessFailure =
+    progress?.ingest_error_code === "youtube_access_required" ||
+    /sign in to confirm|not a bot|cookies|javascript runtime|js runtime/i.test(rawMessage);
+
+  if (isYoutubeAccessFailure) {
+    return {
+      kind: "youtube",
+      eyebrow: "YouTube access check",
+      title: "YouTube blocked the server download.",
+      body: "This video needs browser access before DescribeOps can read it. The job was created, but YouTube would not let the backend fetch the source directly.",
+      steps: [
+        "Open the video in your browser and capture it with the DescribeOps extension.",
+        "Try a different public video URL that does not require sign-in checks.",
+        "For your own videos, ask the server admin to add an authorized cookies.txt file and retry.",
+      ],
+    };
+  }
+
+  return {
+    kind: "generic",
+    eyebrow: "Processing stopped",
+    title: "We could not finish this output.",
+    body: rawMessage || "The backend reported an unknown processing error.",
+    steps: [],
+  };
 }

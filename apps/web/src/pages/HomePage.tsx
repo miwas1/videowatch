@@ -18,6 +18,7 @@ export function HomePage({ onSessionStarted, onOpenSession }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const { health, checking } = useHealth();
+  const urlKind = describeUrl(url);
 
   useEffect(() => {
     api.listSessions(10, 0).then(setSessions).catch(() => setSessions([]));
@@ -25,11 +26,16 @@ export function HomePage({ onSessionStarted, onOpenSession }: Props) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!url.trim()) return;
+    const trimmedUrl = url.trim();
+    if (!trimmedUrl) return;
+    if (!isHttpUrl(trimmedUrl)) {
+      setError("Enter a full video URL that starts with http:// or https://.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
-      const result = await api.ingestUrl({ url: url.trim(), workflow_template: preset });
+      const result = await api.ingestUrl({ url: trimmedUrl, workflow_template: preset });
       onSessionStarted(result.session_id, preset);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start processing");
@@ -111,6 +117,11 @@ export function HomePage({ onSessionStarted, onOpenSession }: Props) {
             </button>
           </div>
           <p id="ingest-hint" className="ingest-form__hint">We analyze speech, on-screen action, and context together.</p>
+          {urlKind === "youtube" && (
+            <p className="ingest-form__notice">
+              Some YouTube videos require browser access. If this job stops at download, use the extension capture from the open video page.
+            </p>
+          )}
           {error && <p id="ingest-error" className="ingest-form__error" role="alert">{error}</p>}
         </form>
       </section>
@@ -184,4 +195,23 @@ export function HomePage({ onSessionStarted, onOpenSession }: Props) {
       </footer>
     </main>
   );
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function describeUrl(value: string): "youtube" | "generic" | "empty" {
+  if (!value.trim()) return "empty";
+  try {
+    const host = new URL(value).hostname.replace(/^www\./, "");
+    return host === "youtube.com" || host === "youtu.be" ? "youtube" : "generic";
+  } catch {
+    return "generic";
+  }
 }

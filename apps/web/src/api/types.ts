@@ -48,6 +48,7 @@ export type SessionProgress = {
   last_event_type: string;
   error_message: string;
   synthesis_error: string;
+  ingest_error_code: string;
 };
 
 export type ChunkSummary = {

@@ -12,6 +12,7 @@ from PIL import Image
 
 from reader.models import ReadingBlock, TimelineMoment, VideoChunk
 from reader.models import VideoSession
+from reader.services.media_ingest import YouTubeAccessError
 
 
 TOKEN = "test-token"
@@ -156,6 +157,36 @@ def test_url_ingest_marks_session_ready_only_after_all_chunks(monkeypatch: pytes
     assert observed_statuses == [VideoSession.Status.PROCESSING, VideoSession.Status.PROCESSING]
     assert session.status == VideoSession.Status.READY
     assert session.chunks.count() == 2
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_url_ingest_classifies_youtube_access_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ImmediateThread:
+        def __init__(self, target: Any, daemon: bool = False) -> None:
+            self.target = target
+            self.daemon = daemon
+
+        def start(self) -> None:
+            self.target()
+
+    def fail_download(*args: Any, **kwargs: Any) -> None:
+        raise YouTubeAccessError("YouTube blocked the server download.")
+
+    monkeypatch.setattr("threading.Thread", ImmediateThread)
+    monkeypatch.setattr("reader.api.download_youtube_video", fail_download)
+
+    response = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).post(
+        "/api/v1/ingest/from-url",
+        data={"url": "https://www.youtube.com/watch?v=1nVGaNbvuXg"},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 202
+    progress = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).get(f"/api/v1/sessions/{response.json()['session_id']}/progress").json()
+    assert progress["status"] == "failed"
+    assert progress["ingest_error_code"] == "youtube_access_required"
+    assert progress["error_message"] == "YouTube blocked the server download."
 
 
 @pytest.mark.django_db
