@@ -12,6 +12,21 @@ class ErrorResponse(Schema):
     detail: str
 
 
+class AuthRequest(Schema):
+    email: str
+    password: str
+
+
+class AuthUserResponse(Schema):
+    id: int
+    email: str
+
+
+class AuthResponse(Schema):
+    token: str
+    user: AuthUserResponse
+
+
 class SessionCreateRequest(Schema):
     source_url: str = ""
     title: str = ""
@@ -105,10 +120,10 @@ class TranscriptRequest(Schema):
 
 class UrlProcessRequest(Schema):
     url: str
-    chunk_seconds: int = 30
-    frame_count: int = 4
-    frame_width: int = 640
-    max_height: int = 360
+    chunk_seconds: int = Field(default=30, ge=5, le=300)
+    frame_count: int = Field(default=4, ge=1, le=12)
+    frame_width: int = Field(default=640, ge=320, le=1920)
+    max_height: int = Field(default=360, ge=144, le=1080)
     workflow_template: str = "reading_document"
     auto_synthesize: bool = True
     output_targets: list[str] = Field(default_factory=list)

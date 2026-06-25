@@ -128,10 +128,11 @@ DESCRIBEOPS_ALLOW_DEBUG_EXTENSION_AUTH = os.getenv(
 ) == "1"
 DESCRIBEOPS_ALLOWED_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("DESCRIBEOPS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    for origin in os.getenv("DESCRIBEOPS_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
     if origin.strip()
 ]
 DESCRIBEOPS_MAX_UPLOAD_BYTES = int(os.getenv("DESCRIBEOPS_MAX_UPLOAD_BYTES", "26214400"))
+DESCRIBEOPS_MAX_VIDEO_UPLOAD_BYTES = int(os.getenv("DESCRIBEOPS_MAX_VIDEO_UPLOAD_BYTES", "524288000"))
 DESCRIBEOPS_MAX_FRAMES_PER_CHUNK = int(os.getenv("DESCRIBEOPS_MAX_FRAMES_PER_CHUNK", "8"))
 DESCRIBEOPS_YTDLP_COOKIE_FILE = os.getenv("DESCRIBEOPS_YTDLP_COOKIE_FILE", "")
 
@@ -171,3 +172,31 @@ QWEN_TEMPERATURE = float(os.getenv("QWEN_TEMPERATURE", "0.1"))
 QWEN_TOP_P = float(os.getenv("QWEN_TOP_P", "0.7"))
 QWEN_ENABLE_FINAL_REPORT_AGENT = os.getenv("QWEN_ENABLE_FINAL_REPORT_AGENT", "1") == "1"
 ALIBABA_CLOUD_DEPLOYMENT = os.getenv("ALIBABA_CLOUD_DEPLOYMENT", "local")
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+        },
+    },
+    "loggers": {
+        "describeops": {
+            "handlers": ["console"],
+            "level": os.getenv("DESCRIBEOPS_LOG_LEVEL", "INFO"),
+            "propagate": False,
+        },
+        "reader": {
+            "handlers": ["console"],
+            "level": os.getenv("DESCRIBEOPS_LOG_LEVEL", "INFO"),
+            "propagate": False,
+        },
+    },
+}

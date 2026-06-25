@@ -21,3 +21,4 @@ apps/desktop-companion/src-tauri/target/
 backend/db.sqlite3
 backend/media/
 outputs/
+secrets/

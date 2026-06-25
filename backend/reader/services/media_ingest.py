@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -28,6 +29,9 @@ class VideoIngestError(RuntimeError):
 
 class YouTubeAccessError(VideoIngestError):
     code = "youtube_access_required"
+
+
+ALLOWED_VIDEO_UPLOAD_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
 def safe_slug(value: str, fallback: str = "video") -> str:
@@ -203,7 +207,6 @@ def attach_frame_file(chunk: VideoChunk, source_path: Path) -> FrameAsset:
 
 
 def transcript_from_vtt(paths: list[Path]) -> str:
-    import re
     if not paths:
         return ""
     lines: list[str] = []
@@ -250,7 +253,6 @@ def timed_transcript_from_vtt(paths: list[Path]) -> list[dict[str, Any]]:
                 text_lines = []
                 continue
             if current_start is not None:
-                import re
                 clean = re.sub(r"<[^>]+>", "", line)
                 if clean:
                     text_lines.append(clean)

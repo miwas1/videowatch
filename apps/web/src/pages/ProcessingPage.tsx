@@ -14,6 +14,7 @@ type Props = {
 export function ProcessingPage({ sessionId, workflowTemplate, onReady, onBack }: Props) {
   const { progress, error, retry } = usePollingProgress(sessionId);
   const [retrying, setRetrying] = useState(false);
+  const [canceling, setCanceling] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -32,6 +33,32 @@ export function ProcessingPage({ sessionId, workflowTemplate, onReady, onBack }:
       setRetryError(caught instanceof Error ? caught.message : "Retry failed");
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function retrySession() {
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      await api.retrySession(sessionId);
+      retry();
+    } catch (caught) {
+      setRetryError(caught instanceof Error ? caught.message : "Retry failed");
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  async function cancelSession() {
+    setCanceling(true);
+    setRetryError(null);
+    try {
+      await api.cancelSession(sessionId);
+      retry();
+    } catch (caught) {
+      setRetryError(caught instanceof Error ? caught.message : "Cancel failed");
+    } finally {
+      setCanceling(false);
     }
   }
 
@@ -58,12 +85,24 @@ export function ProcessingPage({ sessionId, workflowTemplate, onReady, onBack }:
                 {retrying ? "Retrying…" : "Retry synthesis"}
               </button>
             )}
+            <button className="btn btn--secondary" type="button" onClick={() => void retrySession()} disabled={retrying}>
+              {retrying ? "Retrying…" : "Retry job"}
+            </button>
             <button className="btn btn--secondary" type="button" onClick={onBack}>Return home</button>
           </div>
           {retryError && <p className="processing-page__error">{retryError}</p>}
         </section>
       ) : (
-        <ProcessingView sessionId={sessionId} progress={progress} workflowTemplate={workflowTemplate} />
+        <>
+          <ProcessingView sessionId={sessionId} progress={progress} workflowTemplate={workflowTemplate} />
+          {progress?.status === "processing" && (
+            <div className="processing-page__actions">
+              <button className="btn btn--secondary" type="button" onClick={() => void cancelSession()} disabled={canceling}>
+                {canceling ? "Canceling…" : "Cancel job"}
+              </button>
+            </div>
+          )}
+        </>
       )}
       {error && (
         <p className="processing-page__error" role="alert">{error}</p>

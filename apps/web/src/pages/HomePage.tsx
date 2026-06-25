@@ -1,30 +1,46 @@
 import { useEffect, useState } from "react";
-import { ArrowRightIcon, CheckIcon, Link2Icon } from "@radix-ui/react-icons";
+import { ArrowRightIcon, CheckIcon, Link2Icon, UploadIcon } from "@radix-ui/react-icons";
 import { PresetRail } from "@/components/PresetRail";
 import { api } from "@/api/client";
 import { useHealth } from "@/hooks/useHealth";
 import { relativeTime } from "@/lib/format";
-import type { SessionListItem } from "@/api/types";
+import type { AuthUser, SessionListItem } from "@/api/types";
 
 type Props = {
+  currentUser: AuthUser;
+  onLogout: () => void;
   onSessionStarted: (sessionId: string, workflowTemplate: string) => void;
   onOpenSession: (sessionId: string, workflowTemplate: string, destination: "processing" | "review") => void;
 };
 
-export function HomePage({ onSessionStarted, onOpenSession }: Props) {
+export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSession }: Props) {
   const [url, setUrl] = useState("");
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [sourceMode, setSourceMode] = useState<"url" | "upload" | "capture">("url");
   const [preset, setPreset] = useState("reading_document");
   const [submitting, setSubmitting] = useState(false);
+  const [actionSessionId, setActionSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const { health, checking } = useHealth();
   const urlKind = describeUrl(url);
 
   useEffect(() => {
-    api.listSessions(10, 0).then(setSessions).catch(() => setSessions([]));
+    void refreshSessions();
+    const interval = setInterval(() => { void refreshSessions(); }, 15000);
+    return () => clearInterval(interval);
   }, []);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function refreshSessions() {
+    try {
+      setSessions(await api.listSessions(10, 0));
+    } catch {
+      setSessions([]);
+    }
+  }
+
+  async function handleUrlSubmit(e: React.FormEvent) {
     e.preventDefault();
     const trimmedUrl = url.trim();
     if (!trimmedUrl) return;
@@ -44,9 +60,57 @@ export function HomePage({ onSessionStarted, onOpenSession }: Props) {
     }
   }
 
+  async function handleFileSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!videoFile) {
+      setError("Choose a video file to upload.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await api.ingestFile({ video: videoFile, workflow_template: preset });
+      onSessionStarted(result.session_id, preset);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to upload video");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function cancelSession(sessionId: string) {
+    setActionSessionId(sessionId);
+    setActionError(null);
+    try {
+      await api.cancelSession(sessionId);
+      await refreshSessions();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not cancel job");
+    } finally {
+      setActionSessionId(null);
+    }
+  }
+
+  async function deleteSession(sessionId: string) {
+    if (!window.confirm("Delete this job and all its outputs? This cannot be undone.")) return;
+    setActionSessionId(sessionId);
+    setActionError(null);
+    try {
+      await api.deleteSession(sessionId);
+      await refreshSessions();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not delete job");
+    } finally {
+      setActionSessionId(null);
+    }
+  }
+
   function scrollToWorkspace() {
     document.querySelector("#workspace")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    window.setTimeout(() => document.querySelector<HTMLInputElement>("#video-url")?.focus(), 550);
+    window.setTimeout(() => {
+      const target = sourceMode === "upload" ? "#video-file" : "#video-url";
+      document.querySelector<HTMLInputElement>(target)?.focus();
+    }, 550);
   }
 
   return (
@@ -66,6 +130,10 @@ export function HomePage({ onSessionStarted, onOpenSession }: Props) {
             <span>{checking ? "Checking" : health?.ok ? "System online" : "Offline"}</span>
           </div>
           <button className="btn btn--dark site-header__cta" type="button" onClick={scrollToWorkspace}>Start a check</button>
+          <div className="site-header__account" title={currentUser.email}>
+            <span>{currentUser.email}</span>
+            <button type="button" onClick={onLogout}>Sign out</button>
+          </div>
         </div>
       </header>
 
@@ -94,36 +162,78 @@ export function HomePage({ onSessionStarted, onOpenSession }: Props) {
       <section className="workspace-section" id="workspace">
         <div className="section-heading">
           <p className="section-kicker">Start here</p>
-          <h2>One link.<br /><em>Useful access.</em></h2>
-          <p>Paste a public video URL, choose the output people need, and let the analysis run.</p>
+          <h2>Bring a video.<br /><em>Leave with access.</em></h2>
+          <p>Paste a public URL, upload a media file, or capture from a page you can already open in your browser.</p>
         </div>
 
-        <form className="ingest-form" onSubmit={(e) => void handleSubmit(e)}>
-          <label htmlFor="video-url" className="ingest-form__label">Public video URL</label>
-          <div className="ingest-form__row">
-            <Link2Icon className="ingest-form__icon" aria-hidden="true" />
-            <input
-              id="video-url"
-              type="url"
-              className="ingest-form__input"
-              placeholder="Paste a YouTube or video URL"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              required
-              aria-describedby={error ? "ingest-error" : "ingest-hint"}
-            />
-            <button className="btn btn--primary ingest-form__submit" type="submit" disabled={submitting || !url.trim()}>
-              {submitting ? "Starting…" : <>Analyze video <ArrowRightIcon aria-hidden="true" /></>}
-            </button>
+        <div className="ingest-panel">
+          <div className="source-tabs" role="tablist" aria-label="Video source">
+            <button className={`source-tab ${sourceMode === "url" ? "source-tab--active" : ""}`} type="button" role="tab" aria-selected={sourceMode === "url"} onClick={() => { setSourceMode("url"); setError(null); }}>URL</button>
+            <button className={`source-tab ${sourceMode === "upload" ? "source-tab--active" : ""}`} type="button" role="tab" aria-selected={sourceMode === "upload"} onClick={() => { setSourceMode("upload"); setError(null); }}>Upload</button>
+            <button className={`source-tab ${sourceMode === "capture" ? "source-tab--active" : ""}`} type="button" role="tab" aria-selected={sourceMode === "capture"} onClick={() => { setSourceMode("capture"); setError(null); }}>Browser</button>
           </div>
-          <p id="ingest-hint" className="ingest-form__hint">We analyze speech, on-screen action, and context together.</p>
-          {urlKind === "youtube" && (
-            <p className="ingest-form__notice">
-              Some YouTube videos require browser access. If this job stops at download, use the extension capture from the open video page.
-            </p>
+
+          {sourceMode === "url" && (
+            <form className="ingest-form" noValidate onSubmit={(e) => void handleUrlSubmit(e)}>
+              <label htmlFor="video-url" className="ingest-form__label">Public video URL</label>
+              <div className="ingest-form__row">
+                <Link2Icon className="ingest-form__icon" aria-hidden="true" />
+                <input
+                  id="video-url"
+                  type="url"
+                  className="ingest-form__input"
+                  placeholder="Paste a YouTube or video URL"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  required
+                  aria-describedby={error ? "ingest-error" : "ingest-hint"}
+                />
+                <button className="btn btn--primary ingest-form__submit" type="submit" disabled={submitting || !url.trim()}>
+                  {submitting ? "Starting…" : <>Analyze video <ArrowRightIcon aria-hidden="true" /></>}
+                </button>
+              </div>
+              <p id="ingest-hint" className="ingest-form__hint">Best for public YouTube, Vimeo, social, or direct video links.</p>
+              {urlKind === "youtube" && (
+                <p className="ingest-form__notice">
+                  Some YouTube videos require browser access. If this job stops at download, use browser capture from the open video page.
+                </p>
+              )}
+              {error && <p id="ingest-error" className="ingest-form__error" role="alert">{error}</p>}
+            </form>
           )}
-          {error && <p id="ingest-error" className="ingest-form__error" role="alert">{error}</p>}
-        </form>
+
+          {sourceMode === "upload" && (
+            <form className="ingest-form" noValidate onSubmit={(e) => void handleFileSubmit(e)}>
+              <label htmlFor="video-file" className="ingest-form__label">Video file</label>
+              <div className="ingest-form__row ingest-form__row--file">
+                <UploadIcon className="ingest-form__icon" aria-hidden="true" />
+                <input
+                  id="video-file"
+                  type="file"
+                  className="ingest-form__input ingest-form__input--file"
+                  accept="video/mp4,video/webm,video/quicktime,.mp4,.m4v,.mov,.webm,.mkv"
+                  onChange={(e) => setVideoFile(e.target.files?.[0] ?? null)}
+                  required
+                  aria-describedby={error ? "ingest-error" : "upload-hint"}
+                />
+                <button className="btn btn--primary ingest-form__submit" type="submit" disabled={submitting || !videoFile}>
+                  {submitting ? "Uploading…" : <>Upload video <ArrowRightIcon aria-hidden="true" /></>}
+                </button>
+              </div>
+              <p id="upload-hint" className="ingest-form__hint">{videoFile ? `${videoFile.name} · ${formatFileSize(videoFile.size)}` : "Supports MP4, WebM, MOV, M4V, and MKV files."}</p>
+              {error && <p id="ingest-error" className="ingest-form__error" role="alert">{error}</p>}
+            </form>
+          )}
+
+          {sourceMode === "capture" && (
+            <div className="capture-callout">
+              <p className="ingest-form__label">Browser capture</p>
+              <h3>Use this for private, logged-in, embedded, or social videos.</h3>
+              <p>Open the video where you normally watch it, launch the DescribeOps extension, choose this workflow, and send captured chunks to your workspace.</p>
+              <a className="btn btn--secondary" href="#how-it-works">See capture flow <ArrowRightIcon aria-hidden="true" /></a>
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="workflows-section" id="workflows" aria-label="Choose workflow preset">
@@ -168,16 +278,25 @@ export function HomePage({ onSessionStarted, onOpenSession }: Props) {
           <ul className="job-list">
             {sessions.map((s, index) => (
               <li key={s.id} className="job-item">
-                <button className="job-item__btn" type="button" onClick={() => onOpenSession(s.id, s.workflow_template || "reading_document", s.status === "ready" && s.artifact_count > 0 ? "review" : "processing")}>
-                  <span className="job-item__index">{String(index + 1).padStart(2, "0")}</span>
-                  <span className="job-item__title">{s.title || s.page_title || s.source_url || "Untitled"}</span>
-                  <span className={`job-item__status job-item__status--${s.status}`}>{s.status}</span>
-                  <span className="job-item__meta">{s.ready_chunk_count}/{s.chunk_count} chunks · {relativeTime(s.updated_at)}</span>
-                  <ArrowRightIcon aria-hidden="true" />
-                </button>
+                <div className="job-item__row">
+                  <button className="job-item__open" type="button" onClick={() => onOpenSession(s.id, s.workflow_template || "reading_document", s.status === "ready" && s.artifact_count > 0 ? "review" : "processing")}>
+                    <span className="job-item__index">{String(index + 1).padStart(2, "0")}</span>
+                    <span className="job-item__title">{s.title || s.page_title || displayUrl(s.source_url) || "Untitled"}</span>
+                    <span className={`job-item__status job-item__status--${s.status}`}>{s.status}</span>
+                    <span className="job-item__meta">{s.ready_chunk_count}/{s.chunk_count} chunks · {relativeTime(s.updated_at)}</span>
+                    <ArrowRightIcon aria-hidden="true" />
+                  </button>
+                  <div className="job-item__actions" aria-label={`Actions for ${s.title || s.page_title || "job"}`}>
+                    {s.status === "processing" && (
+                      <button className="job-action" type="button" onClick={() => void cancelSession(s.id)} disabled={actionSessionId === s.id}>Cancel</button>
+                    )}
+                    <button className="job-action job-action--danger" type="button" onClick={() => void deleteSession(s.id)} disabled={actionSessionId === s.id}>Delete</button>
+                  </div>
+                </div>
               </li>
             ))}
           </ul>
+          {actionError && <p className="ingest-form__error" role="alert">{actionError}</p>}
         </section>
       )}
 
@@ -213,5 +332,20 @@ function describeUrl(value: string): "youtube" | "generic" | "empty" {
     return host === "youtube.com" || host === "youtu.be" ? "youtube" : "generic";
   } catch {
     return "generic";
+  }
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes > 100 * 1024 * 1024 ? 0 : 1)} MB`;
+}
+
+function displayUrl(value: string): string {
+  if (!value || value.startsWith("upload://")) return value.replace("upload://", "");
+  try {
+    const u = new URL(value);
+    return u.hostname.replace(/^www\./, "") + (u.pathname.length > 1 ? u.pathname.slice(0, 40) : "");
+  } catch {
+    return value.slice(0, 50);
   }
 }

@@ -10,6 +10,7 @@ from django.test import Client, override_settings
 from reader.models import GeneratedArtifact, ReadingBlock, TimelineMoment, VideoChunk, VideoSession
 from reader.services.agents import AgentSocietyRunner, SYNTHESIS_PROFILES
 from reader.services.artifact_builder import WORKFLOW_LABELS, WORKFLOW_TO_ARTIFACT_TYPE, build_artifact_from_session
+from reader.services.jobs import run_next_job
 from reader.services.qwen import QwenResponseError, QwenResult
 
 
@@ -185,9 +186,8 @@ class SuccessfulPipelineRunner:
 
 
 def patch_pipeline(monkeypatch: pytest.MonkeyPatch, runner: Any) -> None:
-    monkeypatch.setattr("reader.api.threading.Thread", ImmediateThread)
     monkeypatch.setattr(
-        "reader.api.download_youtube_video",
+        "reader.services.jobs.download_youtube_video",
         lambda url, work_dir, max_height: SimpleNamespace(
             video_path=Path("video.mp4"),
             metadata={"webpage_url": url, "title": "Template video", "duration_seconds": 60},
@@ -197,6 +197,11 @@ def patch_pipeline(monkeypatch: pytest.MonkeyPatch, runner: Any) -> None:
     monkeypatch.setattr("reader.api.timed_transcript_from_vtt", lambda paths: [])
     monkeypatch.setattr("reader.api.extract_frames_for_chunk", lambda **kwargs: [])
     monkeypatch.setattr("reader.api.AgentSocietyRunner", lambda: runner)
+
+
+def drain_jobs() -> None:
+    while run_next_job() is not None:
+        pass
 
 
 @pytest.mark.django_db
@@ -213,6 +218,7 @@ def test_autopilot_completes_every_template(monkeypatch: pytest.MonkeyPatch, wor
     )
 
     assert response.status_code == 202
+    drain_jobs()
     session_id = response.json()["session_id"]
     progress = client.get(f"/api/v1/sessions/{session_id}/progress").json()
     artifacts = client.get(f"/api/v1/sessions/{session_id}/artifacts").json()
@@ -246,6 +252,7 @@ def test_autopilot_generates_all_requested_output_targets(monkeypatch: pytest.Mo
         },
         content_type="application/json",
     )
+    drain_jobs()
     artifacts = client.get(f"/api/v1/sessions/{response.json()['session_id']}/artifacts").json()
     assert {artifact["workflow_template"] for artifact in artifacts} == {"course_notes", "audio_description", "research_digest"}
 
@@ -278,6 +285,7 @@ def test_synthesis_failure_is_visible_and_retry_recovers(monkeypatch: pytest.Mon
         data={"url": "https://example.com/video", "workflow_template": "research_digest"},
         content_type="application/json",
     )
+    drain_jobs()
     session_id = response.json()["session_id"]
     failed = client.get(f"/api/v1/sessions/{session_id}/progress").json()
     assert failed["status"] == "failed"
@@ -291,6 +299,7 @@ def test_synthesis_failure_is_visible_and_retry_recovers(monkeypatch: pytest.Mon
         content_type="application/json",
     )
     assert retry.status_code == 202
+    drain_jobs()
     recovered = client.get(f"/api/v1/sessions/{session_id}/progress").json()
     assert recovered["status"] == "ready"
     assert recovered["artifact_ready"] is True

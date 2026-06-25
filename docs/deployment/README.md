@@ -5,7 +5,8 @@ This is the single production deployment path for DescribeOps. One Alibaba Cloud
 The stack contains:
 
 - `web`: the Vite React build served by Caddy. Caddy also obtains and renews HTTPS certificates.
-- `backend`: Django, Gunicorn, FFmpeg, and yt-dlp.
+- `backend`: Django API served by Gunicorn.
+- `worker`: Django media-processing worker that runs FFmpeg, yt-dlp, Qwen analysis, and artifact synthesis jobs from the database-backed queue.
 - Docker volumes for generated media, Django static files, and Caddy certificates.
 - Neon PostgreSQL over an encrypted external connection.
 
@@ -83,10 +84,37 @@ Edit `.env` and set at minimum:
 - `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS`, and `DESCRIBEOPS_ALLOWED_ORIGINS` for the same public domain.
 - `DATABASE_URL` to the pooled Neon URL.
 - `DASHSCOPE_API_KEY`.
-- Matching values for `DESCRIBEOPS_API_TOKEN` and `VITE_API_TOKEN`.
-- Optional `DESCRIBEOPS_YTDLP_COOKIE_FILE` when you need the backend to ingest YouTube videos you own or are authorized to access. Mount a Netscape `cookies.txt` file into the backend container and set this to that in-container path.
+- `DESCRIBEOPS_API_TOKEN` as a long random service token for trusted extension/admin ingestion calls.
+- `VITE_API_TOKEN` should stay blank for the public web app. Browser users now sign in and receive per-account API tokens at runtime.
+- Optional `DESCRIBEOPS_SECRETS_DIR=./secrets` and `DESCRIBEOPS_YTDLP_COOKIE_FILE=/app/secrets/youtube-cookies.txt` when you need the backend to ingest YouTube or social videos you own or are authorized to access.
 
-`VITE_API_TOKEN` is compiled into browser JavaScript, so it must not be treated as a confidential credential. It is only a shared application gate.
+`VITE_API_TOKEN` is compiled into browser JavaScript. Do not put the service token there for a product deployment.
+
+For cookie-backed URL ingestion, create the secrets directory on ECS and place a Netscape-format cookies export there:
+
+```bash
+cd /opt/describeops
+mkdir -p secrets
+chmod 700 secrets
+# Upload or create secrets/youtube-cookies.txt, then:
+chmod 600 secrets/youtube-cookies.txt
+```
+
+The file is mounted read-only into the backend container at `/app/secrets/youtube-cookies.txt`. Keep it out of git and rotate it if the browser account changes password or signs out.
+
+To export cookies from a browser session on your local machine, first sign in to YouTube in that browser, then run:
+
+```bash
+./scripts/export-youtube-cookies.sh chrome
+```
+
+You can replace `chrome` with another yt-dlp supported browser name, such as `firefox`, `edge`, or `chromium`. Then copy the generated file to ECS:
+
+```bash
+ssh deploy@YOUR_ECS_IP 'mkdir -p /opt/describeops/secrets && chmod 700 /opt/describeops/secrets'
+scp secrets/youtube-cookies.txt deploy@YOUR_ECS_IP:/opt/describeops/secrets/youtube-cookies.txt
+ssh deploy@YOUR_ECS_IP 'chmod 600 /opt/describeops/secrets/youtube-cookies.txt && cd /opt/describeops && docker compose --env-file .env up -d --build'
+```
 
 ## 4. Start manually
 
@@ -98,7 +126,7 @@ docker compose --env-file .env up -d --build
 docker compose ps
 ```
 
-The backend container automatically runs migrations and `collectstatic` before starting Gunicorn. Verify the public endpoint:
+The backend container automatically runs migrations and `collectstatic` before starting Gunicorn. The worker container runs `python manage.py runworker` and consumes queued URL, upload, extension chunk, and synthesis jobs. Verify the public endpoint:
 
 ```bash
 curl -fsS https://describeops.example.com/health
@@ -159,5 +187,13 @@ Run a Django command:
 ```bash
 docker compose exec backend python manage.py check --deploy
 ```
+
+Process one queued job manually, useful when debugging a stuck queue:
+
+```bash
+docker compose exec worker python manage.py runworker --once
+```
+
+Users can cancel, retry, and delete jobs from the web app. Operators can confirm the queue is draining by watching `job.queued`, `job.started`, `job.succeeded`, `job.failed`, and `job.canceled` events in the session event stream or container logs.
 
 Docker volumes keep media and TLS data across container rebuilds. They do not replace backups: use Neon backups for PostgreSQL and regularly copy the `describeops_media` volume or move media to object storage before scaling to multiple ECS instances.

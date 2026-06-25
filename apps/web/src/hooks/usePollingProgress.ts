@@ -11,8 +11,10 @@ export function usePollingProgress(sessionId: string | null) {
   const [version, setVersion] = useState(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRef = useRef(true);
+  const visibleRef = useRef(!document.hidden);
 
   const fetchOnce = useCallback(async (id: string) => {
+    if (!visibleRef.current) return;
     try {
       const data = await api.getProgress(id);
       if (!activeRef.current) return;
@@ -32,8 +34,19 @@ export function usePollingProgress(sessionId: string | null) {
     if (!sessionId) return;
     activeRef.current = true;
     void fetchOnce(sessionId);
+
+    function onVisibility() {
+      visibleRef.current = !document.hidden;
+      if (!document.hidden && sessionId) {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        void fetchOnce(sessionId);
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       activeRef.current = false;
+      document.removeEventListener("visibilitychange", onVisibility);
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, [sessionId, fetchOnce, version]);

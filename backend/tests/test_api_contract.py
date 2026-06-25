@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, override_settings
 from PIL import Image
 
-from reader.models import ReadingBlock, TimelineMoment, VideoChunk
+from reader.models import ProcessingJob, ReadingBlock, TimelineMoment, UserApiToken, VideoChunk
 from reader.models import VideoSession
+from reader.services.jobs import run_next_job
 from reader.services.media_ingest import YouTubeAccessError
 
 
 TOKEN = "test-token"
+
+
+def drain_jobs() -> None:
+    while run_next_job() is not None:
+        pass
 
 
 def png_frame() -> SimpleUploadedFile:
@@ -23,6 +31,11 @@ def png_frame() -> SimpleUploadedFile:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return SimpleUploadedFile("frame.png", buffer.getvalue(), content_type="image/png")
+
+
+def create_user_token(user, raw_token: str) -> str:
+    UserApiToken.objects.create(user=user, token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest())
+    return raw_token
 
 
 class ImmediateRunner:
@@ -53,6 +66,63 @@ class ImmediateRunner:
             importance=5,
         )
         return {"blocks": [block], "timeline": [moment]}
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_register_issues_account_token_and_me_returns_user() -> None:
+    client = Client()
+
+    response = client.post(
+        "/api/v1/auth/register",
+        data={"email": "Reader@Example.com", "password": "strong-pass-123"},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["token"]
+    assert payload["user"]["email"] == "reader@example.com"
+
+    me_response = Client(HTTP_X_DESCRIBEOPS_TOKEN=payload["token"]).get("/api/v1/auth/me")
+    assert me_response.status_code == 200
+    assert me_response.json() == payload["user"]
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_user_tokens_only_see_owned_sessions() -> None:
+    User = get_user_model()
+    owner = User.objects.create_user(username="owner@example.com", email="owner@example.com", password="strong-pass-123")
+    other = User.objects.create_user(username="other@example.com", email="other@example.com", password="strong-pass-123")
+    owner_token = create_user_token(owner, "owner-token")
+
+    own_session = VideoSession.objects.create(owner=owner, source_url="https://example.com/own", title="Own session")
+    VideoSession.objects.create(owner=other, source_url="https://example.com/other", title="Other session")
+
+    client = Client(HTTP_X_DESCRIBEOPS_TOKEN=owner_token)
+    list_response = client.get("/api/v1/sessions")
+    assert list_response.status_code == 200
+    assert [session["id"] for session in list_response.json()] == [str(own_session.id)]
+
+    other_session = VideoSession.objects.get(owner=other)
+    detail_response = client.get(f"/api/v1/sessions/{other_session.id}")
+    assert detail_response.status_code == 404
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_service_token_can_still_see_all_sessions() -> None:
+    User = get_user_model()
+    owner = User.objects.create_user(username="owner@example.com", email="owner@example.com", password="strong-pass-123")
+    other = User.objects.create_user(username="other@example.com", email="other@example.com", password="strong-pass-123")
+    VideoSession.objects.create(owner=owner, source_url="https://example.com/own", title="Own session")
+    VideoSession.objects.create(owner=other, source_url="https://example.com/other", title="Other session")
+
+    response = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).get("/api/v1/sessions")
+
+    assert response.status_code == 200
+    assert {session["title"] for session in response.json()} == {"Own session", "Other session"}
 
 
 @pytest.mark.django_db
@@ -113,14 +183,6 @@ def test_session_chunk_document_and_correction_flow(monkeypatch: pytest.MonkeyPa
 def test_url_ingest_marks_session_ready_only_after_all_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     observed_statuses: list[str] = []
 
-    class ImmediateThread:
-        def __init__(self, target: Any, daemon: bool = False) -> None:
-            self.target = target
-            self.daemon = daemon
-
-        def start(self) -> None:
-            self.target()
-
     class ChunkOnlyRunner:
         def process_chunk(self, chunk: VideoChunk) -> dict[str, Any]:
             chunk.status = VideoChunk.Status.READY
@@ -129,9 +191,8 @@ def test_url_ingest_marks_session_ready_only_after_all_chunks(monkeypatch: pytes
             observed_statuses.append(chunk.session.status)
             return {}
 
-    monkeypatch.setattr("threading.Thread", ImmediateThread)
     monkeypatch.setattr(
-        "reader.api.download_youtube_video",
+        "reader.services.jobs.download_youtube_video",
         lambda url, work_dir, max_height: SimpleNamespace(
             video_path=Path("video.mp4"),
             metadata={
@@ -153,6 +214,7 @@ def test_url_ingest_marks_session_ready_only_after_all_chunks(monkeypatch: pytes
     )
 
     assert response.status_code == 202
+    drain_jobs()
     session = VideoSession.objects.get(id=response.json()["session_id"])
     assert observed_statuses == [VideoSession.Status.PROCESSING, VideoSession.Status.PROCESSING]
     assert session.status == VideoSession.Status.READY
@@ -162,19 +224,10 @@ def test_url_ingest_marks_session_ready_only_after_all_chunks(monkeypatch: pytes
 @pytest.mark.django_db
 @override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
 def test_url_ingest_classifies_youtube_access_failures(monkeypatch: pytest.MonkeyPatch) -> None:
-    class ImmediateThread:
-        def __init__(self, target: Any, daemon: bool = False) -> None:
-            self.target = target
-            self.daemon = daemon
-
-        def start(self) -> None:
-            self.target()
-
     def fail_download(*args: Any, **kwargs: Any) -> None:
         raise YouTubeAccessError("YouTube blocked the server download.")
 
-    monkeypatch.setattr("threading.Thread", ImmediateThread)
-    monkeypatch.setattr("reader.api.download_youtube_video", fail_download)
+    monkeypatch.setattr("reader.services.jobs.download_youtube_video", fail_download)
 
     response = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).post(
         "/api/v1/ingest/from-url",
@@ -183,10 +236,108 @@ def test_url_ingest_classifies_youtube_access_failures(monkeypatch: pytest.Monke
     )
 
     assert response.status_code == 202
+    run_next_job()
     progress = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).get(f"/api/v1/sessions/{response.json()['session_id']}/progress").json()
     assert progress["status"] == "failed"
     assert progress["ingest_error_code"] == "youtube_access_required"
     assert progress["error_message"] == "YouTube blocked the server download."
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN, MEDIA_ROOT="/tmp/describeops-test-media")
+def test_file_ingest_processes_uploaded_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ChunkOnlyRunner:
+        def process_chunk(self, chunk: VideoChunk) -> dict[str, Any]:
+            chunk.status = VideoChunk.Status.READY
+            chunk.save(update_fields=["status", "updated_at"])
+            return {}
+
+    monkeypatch.setattr("reader.api.probe_duration", lambda path: 61)
+    monkeypatch.setattr("reader.api.extract_frames_for_chunk", lambda **kwargs: [])
+    monkeypatch.setattr("reader.api.AgentSocietyRunner", lambda: ChunkOnlyRunner())
+
+    response = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).post(
+        "/api/v1/ingest/from-file",
+        data={
+            "video": SimpleUploadedFile("lesson.mp4", b"not-a-real-video", content_type="video/mp4"),
+            "workflow_template": "reading_document",
+            "chunk_seconds": "30",
+            "auto_synthesize": "false",
+        },
+    )
+
+    assert response.status_code == 202
+    drain_jobs()
+    session = VideoSession.objects.get(id=response.json()["session_id"])
+    assert session.status == VideoSession.Status.READY
+    assert session.settings["source_type"] == "upload"
+    assert session.settings["filename"] == "lesson.mp4"
+    assert session.chunks.count() == 3
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_cancel_session_marks_queued_jobs_canceled() -> None:
+    session = VideoSession.objects.create(
+        status=VideoSession.Status.PROCESSING,
+        pipeline_stage=VideoSession.PipelineStage.DOWNLOADING,
+        settings={"workflow_template": "reading_document"},
+    )
+    ProcessingJob.objects.create(session=session, job_type=ProcessingJob.JobType.URL_INGEST, payload={})
+
+    response = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).post(f"/api/v1/sessions/{session.id}/cancel", data={}, content_type="application/json")
+
+    assert response.status_code == 202
+    session.refresh_from_db()
+    assert session.status == VideoSession.Status.FAILED
+    assert session.settings["cancel_requested"] is True
+    assert session.error_message == "Canceled by user."
+    assert session.processing_jobs.get().status == ProcessingJob.Status.CANCELED
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_retry_failed_url_session_requeues_ingest() -> None:
+    session = VideoSession.objects.create(
+        source_url="https://example.com/video",
+        status=VideoSession.Status.FAILED,
+        pipeline_stage=VideoSession.PipelineStage.FAILED,
+        settings={
+            "workflow_template": "reading_document",
+            "chunk_seconds": 30,
+            "frame_count": 4,
+            "frame_width": 640,
+            "max_height": 360,
+            "auto_synthesize": True,
+            "output_targets": ["reading_document"],
+            "ingest_error_code": "youtube_access_required",
+            "cancel_requested": True,
+        },
+        error_message="YouTube blocked the server download.",
+    )
+
+    response = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).post(f"/api/v1/sessions/{session.id}/retry", data={}, content_type="application/json")
+
+    assert response.status_code == 202
+    session.refresh_from_db()
+    assert session.status == VideoSession.Status.PROCESSING
+    assert session.pipeline_stage == VideoSession.PipelineStage.DOWNLOADING
+    assert session.settings["cancel_requested"] is False
+    assert session.settings["ingest_error_code"] == ""
+    job = session.processing_jobs.get()
+    assert job.job_type == ProcessingJob.JobType.URL_INGEST
+    assert job.payload["url"] == "https://example.com/video"
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_delete_session_removes_session() -> None:
+    session = VideoSession.objects.create(source_url="https://example.com/video")
+
+    response = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN).delete(f"/api/v1/sessions/{session.id}")
+
+    assert response.status_code == 200
+    assert not VideoSession.objects.filter(id=session.id).exists()
 
 
 @pytest.mark.django_db

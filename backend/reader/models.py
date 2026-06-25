@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 
+from django.conf import settings
 from django.db import models
 
 
@@ -22,6 +23,7 @@ class VideoSession(models.Model):
         FAILED = "failed", "Failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="video_sessions", on_delete=models.CASCADE, null=True, blank=True)
     source_url = models.TextField(blank=True)
     title = models.CharField(max_length=500, blank=True)
     page_title = models.CharField(max_length=500, blank=True)
@@ -162,6 +164,42 @@ class SessionEvent(models.Model):
         ]
 
 
+class ProcessingJob(models.Model):
+    class JobType(models.TextChoices):
+        URL_INGEST = "url_ingest", "URL ingest"
+        FILE_INGEST = "file_ingest", "File ingest"
+        CHUNK_ANALYSIS = "chunk_analysis", "Chunk analysis"
+        SYNTHESIS_RETRY = "synthesis_retry", "Synthesis retry"
+
+    class Status(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        RUNNING = "running", "Running"
+        SUCCEEDED = "succeeded", "Succeeded"
+        FAILED = "failed", "Failed"
+        CANCELED = "canceled", "Canceled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(VideoSession, related_name="processing_jobs", on_delete=models.CASCADE, db_index=True)
+    job_type = models.CharField(max_length=40, choices=JobType.choices, db_index=True)
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.QUEUED, db_index=True)
+    payload = models.JSONField(default=dict, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    max_attempts = models.PositiveSmallIntegerField(default=2)
+    locked_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["status", "created_at"], name="job_status_created_idx"),
+            models.Index(fields=["session", "status"], name="job_session_status_idx"),
+        ]
+
+
 class UserCorrection(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     block = models.ForeignKey(ReadingBlock, related_name="corrections", on_delete=models.CASCADE)
@@ -201,3 +239,16 @@ class GeneratedArtifact(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["session", "workflow_template"], name="unique_session_workflow_artifact"),
         ]
+
+
+class UserApiToken(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="describeops_tokens", on_delete=models.CASCADE)
+    name = models.CharField(max_length=120, default="web")
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]

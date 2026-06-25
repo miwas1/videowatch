@@ -19,11 +19,17 @@ uv run pytest
 uv run python manage.py qwen_smoke
 uv run python manage.py pipeline_smoke
 uv run python manage.py runserver 127.0.0.1:8000
+uv run python manage.py runworker
 ```
 
 ## Main endpoints
 
 - `POST /api/v1/sessions`
+- `POST /api/v1/ingest/from-url`
+- `POST /api/v1/ingest/from-file`
+- `POST /api/v1/sessions/{session_id}/cancel`
+- `POST /api/v1/sessions/{session_id}/retry`
+- `DELETE /api/v1/sessions/{session_id}`
 - `POST /api/v1/sessions/{session_id}/chunks`
 - `GET /api/v1/sessions/{session_id}/document`
 - `GET /api/v1/sessions/{session_id}/timeline`

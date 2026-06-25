@@ -1,6 +1,16 @@
 export type SessionStatus = "created" | "processing" | "ready" | "failed";
 export type ChunkStatus = "accepted" | "analyzing" | "ready" | "failed";
 
+export type AuthUser = {
+  id: number;
+  email: string;
+};
+
+export type AuthResponse = {
+  token: string;
+  user: AuthUser;
+};
+
 export type SessionListItem = {
   id: string;
   source_url: string;
