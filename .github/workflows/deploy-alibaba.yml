@@ -130,6 +130,7 @@ jobs:
           cd "$APP_DIR"
           test -f .env
           docker compose --env-file .env config --quiet
+          docker compose --env-file .env down --remove-orphans
           docker compose --env-file .env up -d --build --remove-orphans
           docker compose ps
           REMOTE
@@ -137,4 +138,3 @@ jobs:
       - name: Check public health endpoint
         if: ${{ env.DEPLOY_HEALTH_URL != '' }}
         run: curl -fsS --retry 12 --retry-delay 5 --retry-all-errors "$DEPLOY_HEALTH_URL"
-
