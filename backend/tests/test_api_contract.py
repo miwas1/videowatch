@@ -435,8 +435,8 @@ def test_extension_origin_can_stream_session_events_without_token_by_default() -
 
 
 @pytest.mark.django_db
-@override_settings(DEBUG=False, DESCRIBEOPS_API_TOKEN=TOKEN, DESCRIBEOPS_ALLOW_EXTENSION_AUTH=False)
-def test_extension_origin_auth_can_be_disabled() -> None:
+@override_settings(DEBUG=False, DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_extension_origin_auth_is_always_tokenless() -> None:
     response = Client(HTTP_ORIGIN="chrome-extension://describeops-installed").post(
         "/api/v1/sessions",
         data={
@@ -446,7 +446,7 @@ def test_extension_origin_auth_can_be_disabled() -> None:
         },
         content_type="application/json",
     )
-    assert response.status_code == 401
+    assert response.status_code == 201
 
 
 @pytest.mark.django_db

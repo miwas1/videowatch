@@ -5,7 +5,6 @@ const PRODUCTION_API_BASE_URL = "https://videowatch.platinexsolutions.com.ng";
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   apiBaseUrl: PRODUCTION_API_BASE_URL,
-  apiToken: "",
   chunkSeconds: 30,
   framesPerChunk: 4,
   autoCapture: false,
@@ -31,7 +30,6 @@ export function normalizeSettings(value: Partial<ExtensionSettings> | undefined)
   const rawApiBaseUrl = trimTrailingSlash(value?.apiBaseUrl || DEFAULT_SETTINGS.apiBaseUrl);
   return {
     apiBaseUrl: isLegacyLocalDefault(rawApiBaseUrl) ? PRODUCTION_API_BASE_URL : rawApiBaseUrl,
-    apiToken: value?.apiToken ?? DEFAULT_SETTINGS.apiToken,
     chunkSeconds: Number.isFinite(chunkSeconds) ? Math.max(8, Math.min(120, Math.round(chunkSeconds))) : DEFAULT_SETTINGS.chunkSeconds,
     framesPerChunk: Number.isFinite(framesPerChunk) ? Math.max(1, Math.min(8, Math.round(framesPerChunk))) : DEFAULT_SETTINGS.framesPerChunk,
     autoCapture: Boolean(value?.autoCapture ?? DEFAULT_SETTINGS.autoCapture),

@@ -126,7 +126,6 @@ DESCRIBEOPS_ALLOW_DEBUG_EXTENSION_AUTH = os.getenv(
     "DESCRIBEOPS_ALLOW_DEBUG_EXTENSION_AUTH",
     "1" if DEBUG else "0",
 ) == "1"
-DESCRIBEOPS_ALLOW_EXTENSION_AUTH = os.getenv("DESCRIBEOPS_ALLOW_EXTENSION_AUTH", "1") == "1"
 DESCRIBEOPS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("DESCRIBEOPS_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")

@@ -108,7 +108,7 @@ class ExtensionTokenAuth(APIKeyHeader):
 
 
 def is_trusted_extension_origin_request(request: HttpRequest) -> bool:
-    return bool(settings.DESCRIBEOPS_ALLOW_EXTENSION_AUTH and request.headers.get("Origin", "").startswith("chrome-extension://"))
+    return request.headers.get("Origin", "").startswith("chrome-extension://")
 
 
 def is_debug_automatic_extension_request(request: HttpRequest) -> bool:

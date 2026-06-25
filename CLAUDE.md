@@ -114,7 +114,7 @@ Loaded from `.env` (repo root or `backend/`):
 
 ```
 DASHSCOPE_API_KEY=          # Qwen/DashScope API key
-DESCRIBEOPS_API_TOKEN=      # Extension → backend auth (X-DescribeOps-Token header)
+DESCRIBEOPS_API_TOKEN=      # Optional service/admin token for scripted callers
 QWEN_VISUAL_MODEL=          # default: qwen3.6-flash
 QWEN_TEXT_MODEL=            # default: qwen3.6-plus
 QWEN_FINAL_MODEL=           # default: qwen3.7-max
@@ -127,5 +127,5 @@ DJANGO_ALLOWED_HOSTS=
 
 - Python 3.12+ required.
 - The extension targets Chrome 116+ (Manifest V3); `sidePanel` API is the main UI surface.
-- Auth between extension and backend is a static bearer token (`X-DescribeOps-Token`), checked by `ExtensionTokenAuth` in `api.py`.
+- Installed Chrome extension requests from `chrome-extension://…` origins are tokenless; account/service callers can still use `X-DescribeOps-Token`, checked by `ExtensionTokenAuth` in `api.py`.
 - Media files, frames, and DB (`db.sqlite3`) are gitignored; the `media/` and `outputs/` directories are local-only.

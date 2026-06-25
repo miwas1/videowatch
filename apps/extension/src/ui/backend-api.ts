@@ -144,12 +144,8 @@ export class DescribeOpsApi {
 
   private async request(path: string, init: RequestInit & { auth?: boolean; contentType?: string | null }): Promise<Response> {
     const headers = new Headers(init.headers);
-    const shouldAuth = init.auth ?? true;
     if (init.contentType !== null) {
       headers.set("Content-Type", init.contentType ?? "application/json");
-    }
-    if (shouldAuth && this.settings.apiToken) {
-      headers.set("X-DescribeOps-Token", this.settings.apiToken);
     }
 
     const response = await fetch(`${this.settings.apiBaseUrl}${path}`, {
