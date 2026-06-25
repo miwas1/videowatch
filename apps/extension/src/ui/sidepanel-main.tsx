@@ -33,6 +33,10 @@ import type {
 } from "../types";
 import "./styles.css";
 
+const INITIAL_EVENT_POLL_MS = 2000;
+const MAX_EVENT_POLL_MS = 30000;
+const MAX_LIVE_FRAME_FAILURES = 3;
+
 function SidePanel() {
   const [settings, setSettings] = useState<ExtensionSettings | null>(null);
   const [draftSettings, setDraftSettings] = useState<ExtensionSettings | null>(null);
@@ -121,15 +125,16 @@ function SidePanel() {
     if (stage !== "upload" || !session || !settings) return;
     let cancelled = false;
     let lastEventId = 0;
+    let retryDelayMs = INITIAL_EVENT_POLL_MS;
 
     async function pollEvents() {
       while (!cancelled) {
         try {
           const url = `${settings!.apiBaseUrl}/api/v1/sessions/${session!.id}/events?after=${lastEventId}`;
           const headers: Record<string, string> = { Accept: "text/event-stream" };
-          if (settings!.apiToken) headers["Authorization"] = `Bearer ${settings!.apiToken}`;
+          if (settings!.apiToken) headers["X-DescribeOps-Token"] = settings!.apiToken;
           const res = await fetch(url, { headers });
-          if (!res.ok) break;
+          if (!res.ok) throw new Error(`Event stream returned ${res.status}`);
           const text = await res.text();
           const lines = text.split("\n");
           for (const line of lines) {
@@ -149,12 +154,16 @@ function SidePanel() {
               }
             }
           }
+          retryDelayMs = INITIAL_EVENT_POLL_MS;
         } catch {
-          // Network error, stop polling
-          break;
+          if (cancelled) break;
+          setProgressText(`Connection interrupted. Retrying in ${Math.round(retryDelayMs / 1000)}s...`);
+          await wait(retryDelayMs);
+          retryDelayMs = Math.min(MAX_EVENT_POLL_MS, retryDelayMs * 2);
+          continue;
         }
         if (cancelled) break;
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await wait(INITIAL_EVENT_POLL_MS);
       }
     }
 
@@ -305,15 +314,20 @@ function SidePanel() {
       setStage("upload");
       setProgressText("Uploading frames to agent society...");
       setStatus(`Uploading ${frameResponse.payload.length} frames. Agents are analyzing.`);
-      const uploaded = await api.uploadChunk({
-        sessionId: activeSession.id,
-        chunkIndex: activeChunkIndex,
-        startSeconds: start,
-        endSeconds: end,
-        transcriptText: transcriptSlice || transcriptFromSnapshot(activeSnapshot),
-        captureNotes: captureNotes(activeSnapshot, activeMedia, frameResponse.payload[0]),
-        frames: frameResponse.payload
-      });
+      let uploaded: { status: string };
+      try {
+        uploaded = await api.uploadChunk({
+          sessionId: activeSession.id,
+          chunkIndex: activeChunkIndex,
+          startSeconds: start,
+          endSeconds: end,
+          transcriptText: transcriptSlice || transcriptFromSnapshot(activeSnapshot),
+          captureNotes: captureNotes(activeSnapshot, activeMedia, frameResponse.payload[0]),
+          frames: frameResponse.payload
+        });
+      } finally {
+        releaseCapturedFrames(frameResponse.payload);
+      }
 
       const newRange: CapturedRange = { start, end, chunkIndex: activeChunkIndex };
       setCapturedRanges((prev) => [...prev, newRange]);
@@ -423,6 +437,7 @@ function SidePanel() {
 
       const chunkSeconds = settings?.chunkSeconds ?? 30;
       const frameCount = settings?.framesPerChunk ?? 4;
+      let consecutiveFrameFailures = 0;
       setStage("upload");
       setStatus("Live capture running. DescribeOps will add chunks until you stop.");
 
@@ -439,8 +454,25 @@ function SidePanel() {
         }) as RuntimeResponse<CapturedFrame[]>;
 
         if (!frameResponse.ok) {
-          fail("Live frame capture failed.", frameResponse.message);
-          return;
+          consecutiveFrameFailures += 1;
+          if (consecutiveFrameFailures >= MAX_LIVE_FRAME_FAILURES) {
+            setStatus(`Live capture stopped after ${MAX_LIVE_FRAME_FAILURES} frame capture failures.`);
+            break;
+          }
+          setStatus(`Live frame capture failed. Retrying (${consecutiveFrameFailures}/${MAX_LIVE_FRAME_FAILURES}).`);
+          continue;
+        }
+
+        const allFramesFailed = frameResponse.payload.length === 0 || frameResponse.payload.every(isFrameCaptureFailure);
+        if (allFramesFailed) {
+          consecutiveFrameFailures += 1;
+          if (consecutiveFrameFailures >= MAX_LIVE_FRAME_FAILURES) {
+            releaseCapturedFrames(frameResponse.payload);
+            setStatus(`Live capture stopped after ${MAX_LIVE_FRAME_FAILURES} fallback-only frame chunks.`);
+            break;
+          }
+        } else {
+          consecutiveFrameFailures = 0;
         }
 
         const scanResponse = await chrome.runtime.sendMessage({ name: "PAGE_SCAN_REQUESTED" }) as RuntimeResponse<PageAccessibilitySnapshot>;
@@ -453,15 +485,19 @@ function SidePanel() {
 
         const chunkEnd = Math.max(chunkStart + 1, liveElapsedSeconds());
         setStatus(`Uploading live chunk ${activeChunkIndex + 1}: ${formatClock(chunkStart)} to ${formatClock(chunkEnd)}.`);
-        await api.uploadChunkAsync({
-          sessionId: activeSession.id,
-          chunkIndex: activeChunkIndex,
-          startSeconds: chunkStart,
-          endSeconds: chunkEnd,
-          transcriptText: transcriptFromSnapshot(activeSnapshot),
-          captureNotes: `${captureNotes(activeSnapshot, media, frameResponse.payload[0])}\nCapture mode: live stream`,
-          frames: frameResponse.payload
-        });
+        try {
+          await api.uploadChunkAsync({
+            sessionId: activeSession.id,
+            chunkIndex: activeChunkIndex,
+            startSeconds: chunkStart,
+            endSeconds: chunkEnd,
+            transcriptText: transcriptFromSnapshot(activeSnapshot),
+            captureNotes: `${captureNotes(activeSnapshot, media, frameResponse.payload[0])}\nCapture mode: live stream`,
+            frames: frameResponse.payload
+          });
+        } finally {
+          releaseCapturedFrames(frameResponse.payload);
+        }
 
         const newRange: CapturedRange = { start: chunkStart, end: chunkEnd, chunkIndex: activeChunkIndex };
         setCapturedRanges((prev) => [...prev, newRange]);
@@ -1401,6 +1437,16 @@ function captureNotes(snapshot: PageAccessibilitySnapshot, media: DetectedMedia,
   ].join("\n");
 }
 
+function releaseCapturedFrames(frames: CapturedFrame[]): void {
+  for (const frame of frames) {
+    frame.dataUrl = "";
+  }
+}
+
+function isFrameCaptureFailure(frame: CapturedFrame): boolean {
+  return frame.isFallback && !/tab screenshot/i.test(frame.note);
+}
+
 function describePlatform(media: DetectedMedia): string {
   const labels: Record<DetectedMedia["platform"], string> = {
     youtube: "YouTube video",
@@ -1420,6 +1466,10 @@ function formatClock(seconds: number): string {
   const minutes = Math.floor(safe / 60);
   const remainder = safe % 60;
   return `${minutes}:${remainder.toString().padStart(2, "0")}`;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 createRoot(document.getElementById("root")!).render(

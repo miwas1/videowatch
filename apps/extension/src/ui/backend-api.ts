@@ -11,6 +11,8 @@ import type {
   TranscriptResponse
 } from "../types";
 
+const frameFileCache = new WeakMap<CapturedFrame, File>();
+
 export class DescribeOpsApi {
   constructor(private readonly settings: ExtensionSettings) {}
 
@@ -79,9 +81,7 @@ export class DescribeOpsApi {
     form.set("capture_notes", params.captureNotes);
     form.set("process_now", "true");
 
-    params.frames.forEach((frame, index) => {
-      form.append("frames", dataUrlToFile(frame.dataUrl, `frame-${index + 1}.png`, frame.mimeType));
-    });
+    appendFrameFiles(form, params.frames);
 
     return this.requestJson<ChunkResponse>(`/api/v1/sessions/${params.sessionId}/chunks`, {
       method: "POST",
@@ -117,9 +117,7 @@ export class DescribeOpsApi {
     form.set("transcript_text", params.transcriptText);
     form.set("capture_notes", params.captureNotes);
 
-    params.frames.forEach((frame, index) => {
-      form.append("frames", dataUrlToFile(frame.dataUrl, `frame-${index + 1}.png`, frame.mimeType));
-    });
+    appendFrameFiles(form, params.frames);
 
     return this.requestJson<{ chunk_id: string; status: string; message: string }>(
       `/api/v1/sessions/${params.sessionId}/chunks/async`,
@@ -207,7 +205,22 @@ export class DescribeOpsApi {
   }
 }
 
+function appendFrameFiles(form: FormData, frames: CapturedFrame[]): void {
+  frames.forEach((frame, index) => {
+    form.append("frames", frameToFile(frame, `frame-${index + 1}.png`));
+  });
+}
+
+function frameToFile(frame: CapturedFrame, filename: string): File {
+  const cached = frameFileCache.get(frame);
+  if (cached) return cached;
+  const file = dataUrlToFile(frame.dataUrl, filename, frame.mimeType);
+  frameFileCache.set(frame, file);
+  return file;
+}
+
 function dataUrlToFile(dataUrl: string, filename: string, mimeType: string): File {
+  if (!dataUrl) throw new Error("Captured frame data is missing.");
   const [header, encoded] = dataUrl.split(",");
   const resolvedMime = header.match(/data:(.*?);base64/)?.[1] || mimeType;
   const binary = atob(encoded ?? "");

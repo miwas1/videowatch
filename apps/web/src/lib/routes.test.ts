@@ -10,6 +10,10 @@ describe("app routes", () => {
     for (const route of routes) expect(parseRoute(routeHash(route))).toEqual(route);
   });
 
+  it("round-trips the extension guide route", () => {
+    expect(parseRoute(routeHash({ name: "extensionGuide" }))).toEqual({ name: "extensionGuide" });
+  });
+
   it("falls back to home for unknown hashes", () => {
     expect(parseRoute("#/unknown")).toEqual({ name: "home" });
   });

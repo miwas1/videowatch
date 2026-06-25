@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ArrowRightIcon, CheckIcon, DownloadIcon, Link2Icon, UploadIcon } from "@radix-ui/react-icons";
 import { PresetRail } from "@/components/PresetRail";
 import { api } from "@/api/client";
@@ -14,6 +14,8 @@ type Props = {
 };
 
 const EXTENSION_DOWNLOAD_PATH = "/downloads/describeops-extension.zip";
+const ACTIVE_SESSION_REFRESH_MS = 5000;
+const IDLE_SESSION_REFRESH_MS = 15000;
 
 export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSession }: Props) {
   const [url, setUrl] = useState("");
@@ -27,20 +29,33 @@ export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSessio
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const { health, checking } = useHealth();
   const urlKind = describeUrl(url);
+  const hasProcessingSessions = sessions.some((session) => session.status === "processing");
 
-  useEffect(() => {
-    void refreshSessions();
-    const interval = setInterval(() => { void refreshSessions(); }, 15000);
-    return () => clearInterval(interval);
-  }, []);
-
-  async function refreshSessions() {
+  const refreshSessions = useCallback(async () => {
     try {
       setSessions(await api.listSessions(10, 0));
     } catch {
       setSessions([]);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    void refreshSessions();
+    const interval = setInterval(
+      () => { void refreshSessions(); },
+      hasProcessingSessions ? ACTIVE_SESSION_REFRESH_MS : IDLE_SESSION_REFRESH_MS,
+    );
+    const refreshWhenVisible = () => {
+      if (!document.hidden) void refreshSessions();
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [hasProcessingSessions, refreshSessions]);
 
   async function handleUrlSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -128,6 +143,7 @@ export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSessio
         <nav className="site-header__nav" aria-label="Primary navigation">
           <a href="#workspace">Workspace</a>
           <a href="#install-extension">Extension</a>
+          <a href="#/extension-guide">Guide</a>
           <a href="#workflows">Workflows</a>
           <a href="#how-it-works">How it works</a>
         </nav>
@@ -261,6 +277,9 @@ export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSessio
           <a className="btn btn--primary extension-download" href={EXTENSION_DOWNLOAD_PATH} download>
             <DownloadIcon aria-hidden="true" />
             Download Chrome extension
+          </a>
+          <a className="btn btn--secondary extension-guide-link" href="#/extension-guide">
+            Install and use guide <ArrowRightIcon aria-hidden="true" />
           </a>
         </div>
 

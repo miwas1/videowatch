@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AuthPage } from "@/pages/AuthPage";
+import { ExtensionGuidePage } from "@/pages/ExtensionGuidePage";
 import { HomePage } from "@/pages/HomePage";
 import { ProcessingPage } from "@/pages/ProcessingPage";
 import { ReviewPage } from "@/pages/ReviewPage";
@@ -30,6 +31,7 @@ function AuthenticatedApp({ user, view, setView, onLogout }: AuthenticatedAppPro
   useEffect(() => {
     const titles: Record<string, string> = {
       home: "DescribeOps",
+      extensionGuide: "Extension Guide — DescribeOps",
       processing: "Processing — DescribeOps",
       review: "Review — DescribeOps",
     };
@@ -55,6 +57,16 @@ function AuthenticatedApp({ user, view, setView, onLogout }: AuthenticatedAppPro
         onOpenSession={(sessionId, workflowTemplate, destination) =>
           navigate({ name: destination, sessionId, workflowTemplate })
         }
+      />
+    );
+  }
+
+  if (view.name === "extensionGuide") {
+    return (
+      <ExtensionGuidePage
+        currentUser={user}
+        onBack={() => navigate({ name: "home" })}
+        onLogout={onLogout}
       />
     );
   }

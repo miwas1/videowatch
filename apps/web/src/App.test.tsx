@@ -62,4 +62,20 @@ describe("App", () => {
       expect(screen.getByRole("heading", { name: /Make every frame/i })).toBeTruthy();
     });
   });
+
+  it("shows the extension guide route after validating a stored session", async () => {
+    window.location.hash = "#/extension-guide";
+    storeAuth({
+      token: "test-token",
+      user: { id: 1, email: "reader@example.com" },
+    });
+    vi.spyOn(api, "me").mockResolvedValue({ id: 1, email: "reader@example.com" });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /Install, connect,/i })).toBeTruthy();
+    });
+    expect(screen.getAllByRole("link", { name: /Download extension/i }).length).toBeGreaterThan(0);
+  });
 });
