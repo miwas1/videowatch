@@ -414,6 +414,36 @@ def test_auth_required_for_api() -> None:
 
 
 @pytest.mark.django_db
+@override_settings(DEBUG=False, DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_extension_origin_can_create_session_without_token_by_default() -> None:
+    response = Client(HTTP_ORIGIN="chrome-extension://describeops-installed").post(
+        "/api/v1/sessions",
+        data={
+            "source_url": "https://example.com/watch?v=django",
+            "title": "Build a Django Ninja API",
+            "duration_seconds": 1800,
+        },
+        content_type="application/json",
+    )
+    assert response.status_code == 201
+
+
+@pytest.mark.django_db
+@override_settings(DEBUG=False, DESCRIBEOPS_API_TOKEN=TOKEN, DESCRIBEOPS_ALLOW_EXTENSION_AUTH=False)
+def test_extension_origin_auth_can_be_disabled() -> None:
+    response = Client(HTTP_ORIGIN="chrome-extension://describeops-installed").post(
+        "/api/v1/sessions",
+        data={
+            "source_url": "https://example.com/watch?v=django",
+            "title": "Build a Django Ninja API",
+            "duration_seconds": 1800,
+        },
+        content_type="application/json",
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
 @override_settings(DEBUG=True, DESCRIBEOPS_API_TOKEN=TOKEN, DESCRIBEOPS_ALLOW_DEBUG_EXTENSION_AUTH=True)
 def test_debug_extension_origin_can_create_session_without_token() -> None:
     response = Client(HTTP_ORIGIN="chrome-extension://describeops-local").post(

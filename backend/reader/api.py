@@ -100,9 +100,15 @@ class ExtensionTokenAuth(APIKeyHeader):
                 return AuthContext(kind="user", user=token.user, token=token)
         if is_debug_automatic_extension_request(request):
             return AuthContext(kind="service")
+        if is_trusted_extension_origin_request(request):
+            return AuthContext(kind="service")
         if settings.DEBUG and not configured:
             return AuthContext(kind="service")
         return None
+
+
+def is_trusted_extension_origin_request(request: HttpRequest) -> bool:
+    return bool(settings.DESCRIBEOPS_ALLOW_EXTENSION_AUTH and request.headers.get("Origin", "").startswith("chrome-extension://"))
 
 
 def is_debug_automatic_extension_request(request: HttpRequest) -> bool:

@@ -53,7 +53,7 @@ const useSteps = [
 const troubleshooting = [
   ["No video found", "Start playback first, then scan again. Some pages do not create the video element until playback starts."],
   ["Frames look generic", "The page may block direct video pixels. DescribeOps falls back to a tab screenshot or visible page context."],
-  ["Backend offline", "Open connection settings in the extension and confirm the backend URL and API token."],
+  ["Backend offline", "Use Check in the extension popup. The extension is preconfigured for videowatch.platinexsolutions.com.ng."],
   ["Live capture is slow", "Use shorter chunks for faster updates, or fewer frames per chunk for lighter uploads."],
 ];
 
@@ -116,16 +116,16 @@ export function ExtensionGuidePage({ currentUser, onBack, onLogout }: Props) {
       <section className="guide-section guide-split" id="configure">
         <div>
           <p className="section-kicker">Configure</p>
-          <h2>Point the extension at your backend.</h2>
+          <h2>Open the preconfigured backend.</h2>
           <p>
-            Open the DescribeOps side panel, use the connection settings, and set the backend URL used by this workspace.
-            Add the API token if your deployment requires one.
+            The extension is already pointed at the production DescribeOps backend. Open the popup, check the connection,
+            then open the side panel from the video page.
           </p>
         </div>
         <div className="guide-terminal" aria-label="Connection values">
-          <p><span>Backend URL</span><code>https://your-domain.example</code></p>
-          <p><span>Local dev</span><code>http://127.0.0.1:8000</code></p>
-          <p><span>Token header</span><code>X-DescribeOps-Token</code></p>
+          <p><span>Backend URL</span><code>https://videowatch.platinexsolutions.com.ng</code></p>
+          <p><span>Auth</span><code>Automatic extension access</code></p>
+          <p><span>Uploads</span><code>Frames, captions, and live chunks</code></p>
         </div>
       </section>
 

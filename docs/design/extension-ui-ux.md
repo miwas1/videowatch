@@ -35,10 +35,10 @@ The primary surface is the Chrome side panel. The popup is only a launcher and c
 ## Backend Contract
 
 - Health: `GET /health`, unauthenticated.
-- Auth header: `X-DescribeOps-Token`.
+- Auth header for account/service callers: `X-DescribeOps-Token`.
 - Create session: `POST /api/v1/sessions`.
 - Upload chunk: multipart `POST /api/v1/sessions/{session_id}/chunks`.
 - Read document: `GET /api/v1/sessions/{session_id}/document`.
 - Correct block: `PATCH /api/v1/reading-blocks/{block_id}`.
 
-The browser extension stores the API base URL and token in `chrome.storage.sync`. Local defaults target `http://127.0.0.1:8000` with an empty token, which works when the backend is running in debug mode without `DESCRIBEOPS_API_TOKEN`.
+The production browser extension is preconfigured for `https://videowatch.platinexsolutions.com.ng` and does not ask users to enter a backend URL or API token. Chrome extension origins can create sessions and upload capture chunks by default; set `DESCRIBEOPS_ALLOW_EXTENSION_AUTH=0` only when direct extension capture should be disabled.

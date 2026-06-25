@@ -7,6 +7,8 @@ COPY apps/extension/package.json apps/extension/package.json
 RUN npm ci
 
 COPY apps/web/ apps/web/
+COPY apps/extension/ apps/extension/
+COPY scripts/ scripts/
 COPY tsconfig.base.json ./
 
 ARG VITE_API_BASE_URL=""
@@ -19,4 +21,3 @@ RUN npm run build:web
 FROM caddy:2-alpine
 COPY deploy/docker/Caddyfile /etc/caddy/Caddyfile
 COPY --from=build /app/apps/web/dist /srv/web
-

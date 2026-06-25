@@ -47,7 +47,7 @@ jobs:
         with:
           enable-cache: true
           working-directory: backend
-          cache-dependency-glob: backend/uv.lock
+          cache-dependency-glob: uv.lock
 
       - name: Install Python
         working-directory: backend

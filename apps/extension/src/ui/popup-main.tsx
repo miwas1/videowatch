@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { CheckCircledIcon, ExclamationTriangleIcon, GearIcon, OpenInNewWindowIcon } from "@radix-ui/react-icons";
 import { DescribeOpsApi } from "./backend-api";
-import { loadSettings, saveSettings } from "./storage";
+import { loadSettings } from "./storage";
 import type { ExtensionSettings, HealthResponse } from "../types";
 import "./styles.css";
 
@@ -43,13 +43,6 @@ function Popup() {
     await chrome.runtime.sendMessage({ name: "OPEN_SIDE_PANEL" });
   }
 
-  async function updateApiBaseUrl(value: string) {
-    if (!settings) return;
-    const saved = await saveSettings({ ...settings, apiBaseUrl: value });
-    setSettings(saved);
-    setHealth(null);
-  }
-
   async function recheck() {
     if (!api) return;
     setBusy(true);
@@ -77,16 +70,11 @@ function Popup() {
 
       <p className="status-line" role="status" aria-live="polite">{status}</p>
 
-      <label className="field">
-        <span>Backend URL</span>
-        <input
-          type="url"
-          value={settings?.apiBaseUrl ?? ""}
-          onChange={(event) => void updateApiBaseUrl(event.currentTarget.value)}
-          placeholder="http://127.0.0.1:8000"
-        />
-        <small>Used for session creation, chunk upload, reviewer corrections, and document reads.</small>
-      </label>
+      <div className="field">
+        <span>Backend</span>
+        <strong>{settings?.apiBaseUrl ?? "https://videowatch.platinexsolutions.com.ng"}</strong>
+        <small>DescribeOps is preconfigured for this deployment.</small>
+      </div>
 
       <div className="popup-actions">
         <button type="button" className="button primary" onClick={openPanel}>

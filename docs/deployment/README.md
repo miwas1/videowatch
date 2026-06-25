@@ -84,7 +84,8 @@ Edit `.env` and set at minimum:
 - `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS`, and `DESCRIBEOPS_ALLOWED_ORIGINS` for the same public domain.
 - `DATABASE_URL` to the pooled Neon URL.
 - `DASHSCOPE_API_KEY`.
-- `DESCRIBEOPS_API_TOKEN` as a long random service token for trusted extension/admin ingestion calls.
+- `DESCRIBEOPS_API_TOKEN` as a long random service token for admin or scripted ingestion calls.
+- Chrome extension auth is enabled by default, so installed extension requests from `chrome-extension://…` origins can create sessions and upload capture chunks without asking users for an API token. Set `DESCRIBEOPS_ALLOW_EXTENSION_AUTH=0` only if you need to disable direct extension capture.
 - `VITE_API_TOKEN` should stay blank for the public web app. Browser users now sign in and receive per-account API tokens at runtime.
 - Optional `DESCRIBEOPS_SECRETS_DIR=./secrets` and `DESCRIBEOPS_YTDLP_COOKIE_FILE=/app/secrets/youtube-cookies.txt` when you need the backend to ingest YouTube or social videos you own or are authorized to access.
 

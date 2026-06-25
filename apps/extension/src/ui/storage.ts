@@ -1,9 +1,10 @@
 import type { ExtensionSettings } from "../types";
 
 const STORAGE_KEY = "describeops.settings";
+const PRODUCTION_API_BASE_URL = "https://videowatch.platinexsolutions.com.ng";
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
-  apiBaseUrl: "http://127.0.0.1:8000",
+  apiBaseUrl: PRODUCTION_API_BASE_URL,
   apiToken: "",
   chunkSeconds: 30,
   framesPerChunk: 4,
@@ -25,8 +26,9 @@ export async function saveSettings(settings: ExtensionSettings): Promise<Extensi
 export function normalizeSettings(value: Partial<ExtensionSettings> | undefined): ExtensionSettings {
   const chunkSeconds = Number(value?.chunkSeconds ?? DEFAULT_SETTINGS.chunkSeconds);
   const framesPerChunk = Number(value?.framesPerChunk ?? DEFAULT_SETTINGS.framesPerChunk);
+  const rawApiBaseUrl = trimTrailingSlash(value?.apiBaseUrl || DEFAULT_SETTINGS.apiBaseUrl);
   return {
-    apiBaseUrl: trimTrailingSlash(value?.apiBaseUrl || DEFAULT_SETTINGS.apiBaseUrl),
+    apiBaseUrl: isLegacyLocalDefault(rawApiBaseUrl) ? PRODUCTION_API_BASE_URL : rawApiBaseUrl,
     apiToken: value?.apiToken ?? DEFAULT_SETTINGS.apiToken,
     chunkSeconds: Number.isFinite(chunkSeconds) ? Math.max(8, Math.min(120, Math.round(chunkSeconds))) : DEFAULT_SETTINGS.chunkSeconds,
     framesPerChunk: Number.isFinite(framesPerChunk) ? Math.max(1, Math.min(8, Math.round(framesPerChunk))) : DEFAULT_SETTINGS.framesPerChunk,
@@ -36,4 +38,8 @@ export function normalizeSettings(value: Partial<ExtensionSettings> | undefined)
 
 function trimTrailingSlash(value: string): string {
   return value.trim().replace(/\/+$/, "");
+}
+
+function isLegacyLocalDefault(value: string): boolean {
+  return value === "http://127.0.0.1:8000" || value === "http://localhost:8000";
 }

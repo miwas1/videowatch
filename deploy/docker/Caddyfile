@@ -6,7 +6,7 @@
 	encode zstd gzip
 
 	request_body {
-		max_size 30MB
+		max_size 600MB
 	}
 
 	handle_path /media/* {

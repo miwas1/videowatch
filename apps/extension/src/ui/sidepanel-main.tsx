@@ -187,7 +187,7 @@ function SidePanel() {
     setSettings(saved);
     setDraftSettings(saved);
     await checkHealth(saved);
-    setStatus("Connection settings saved.");
+    setStatus("Capture settings saved.");
   }
 
   async function scanActiveTab() {
@@ -756,9 +756,9 @@ function SidePanel() {
             type="button"
             className="icon-button"
             onClick={() => setShowConnectionSettings((value) => !value)}
-            aria-label={showConnectionSettings ? "Hide connection settings" : "Show connection settings"}
+            aria-label={showConnectionSettings ? "Hide capture settings" : "Show capture settings"}
             aria-pressed={showConnectionSettings}
-            title={showConnectionSettings ? "Hide connection settings" : "Connection settings"}
+            title={showConnectionSettings ? "Hide capture settings" : "Capture settings"}
           >
             <GearIcon aria-hidden="true" />
           </button>
@@ -1049,28 +1049,11 @@ function ConnectionPanel({
   disabled: boolean;
 }) {
   return (
-    <section className="connection-panel" aria-label="Backend connection">
+    <section className="connection-panel" aria-label="Capture settings">
       <div className="section-heading">
-        <h2>Connection</h2>
+        <h2>Capture</h2>
         <GearIcon aria-hidden="true" />
       </div>
-      <label className="field">
-        <span>Backend URL</span>
-        <input
-          type="url"
-          value={settings?.apiBaseUrl ?? ""}
-          onChange={(event) => settings && onChange({ ...settings, apiBaseUrl: event.currentTarget.value })}
-        />
-      </label>
-      <label className="field">
-        <span>API token</span>
-        <input
-          type="password"
-          value={settings?.apiToken ?? ""}
-          onChange={(event) => settings && onChange({ ...settings, apiToken: event.currentTarget.value })}
-          placeholder="Optional in debug mode"
-        />
-      </label>
       <label className="field">
         <span>Chunk seconds</span>
         <input
