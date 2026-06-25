@@ -8,7 +8,9 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   apiToken: "",
   chunkSeconds: 30,
   framesPerChunk: 4,
-  autoCapture: true
+  autoCapture: false,
+  captureDetail: "media",
+  screenshotFallback: "cropped"
 };
 
 export async function loadSettings(): Promise<ExtensionSettings> {
@@ -32,7 +34,9 @@ export function normalizeSettings(value: Partial<ExtensionSettings> | undefined)
     apiToken: value?.apiToken ?? DEFAULT_SETTINGS.apiToken,
     chunkSeconds: Number.isFinite(chunkSeconds) ? Math.max(8, Math.min(120, Math.round(chunkSeconds))) : DEFAULT_SETTINGS.chunkSeconds,
     framesPerChunk: Number.isFinite(framesPerChunk) ? Math.max(1, Math.min(8, Math.round(framesPerChunk))) : DEFAULT_SETTINGS.framesPerChunk,
-    autoCapture: Boolean(value?.autoCapture ?? DEFAULT_SETTINGS.autoCapture)
+    autoCapture: Boolean(value?.autoCapture ?? DEFAULT_SETTINGS.autoCapture),
+    captureDetail: normalizeCaptureDetail(value?.captureDetail),
+    screenshotFallback: normalizeScreenshotFallback(value?.screenshotFallback)
   };
 }
 
@@ -42,4 +46,12 @@ function trimTrailingSlash(value: string): string {
 
 function isLegacyLocalDefault(value: string): boolean {
   return value === "http://127.0.0.1:8000" || value === "http://localhost:8000";
+}
+
+function normalizeCaptureDetail(value: unknown): ExtensionSettings["captureDetail"] {
+  return value === "captions" || value === "context" || value === "media" ? value : DEFAULT_SETTINGS.captureDetail;
+}
+
+function normalizeScreenshotFallback(value: unknown): ExtensionSettings["screenshotFallback"] {
+  return value === "off" || value === "cropped" ? value : DEFAULT_SETTINGS.screenshotFallback;
 }

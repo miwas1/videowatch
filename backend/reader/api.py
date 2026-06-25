@@ -147,8 +147,6 @@ def get_session_for_request(request: HttpRequest, session_id: UUID) -> VideoSess
 
 
 def mark_session_ready_when_current_chunks_ready(session: VideoSession) -> None:
-    if session.settings.get("source_type") == "live_capture" and session.settings.get("live_status") == "recording":
-        return
     if session.chunks.exists() and not session.chunks.exclude(status=VideoChunk.Status.READY).exists():
         session.status = VideoSession.Status.READY
         session.pipeline_stage = VideoSession.PipelineStage.READY
@@ -512,62 +510,6 @@ def cancel_session(request: HttpRequest, session_id: UUID) -> Status:
     session.save(update_fields=["settings", "status", "pipeline_stage", "error_message", "updated_at"])
     canceled_jobs = cancel_session_jobs(session)
     return Status(202, {"session_id": str(session.id), "status": "canceled", "canceled_jobs": canceled_jobs})
-
-
-@api.post("/api/v1/sessions/{session_id}/live/finish", response={202: dict, 400: ErrorResponse})
-def finish_live_session(request: HttpRequest, session_id: UUID) -> Status:
-    session = get_session_for_request(request, session_id)
-    if session.settings.get("source_type") != "live_capture":
-        return Status(400, ErrorResponse(detail="Only live capture sessions can be finalized."))
-
-    chunk_stats = session.chunks.aggregate(
-        total=Count("id"),
-        ready=Count("id", filter=Q(status=VideoChunk.Status.READY)),
-        failed=Count("id", filter=Q(status=VideoChunk.Status.FAILED)),
-    )
-    if not chunk_stats["total"]:
-        return Status(400, ErrorResponse(detail="No live chunks have been captured yet."))
-
-    last_chunk = session.chunks.order_by("-end_seconds").first()
-    settings_payload = dict(session.settings or {})
-    settings_payload["live_status"] = "stopped"
-    session.settings = settings_payload
-    session.expected_chunk_count = int(chunk_stats["total"])
-    session.duration_seconds = float(last_chunk.end_seconds) if last_chunk else session.duration_seconds
-
-    if chunk_stats["failed"]:
-        session.status = VideoSession.Status.FAILED
-        session.pipeline_stage = VideoSession.PipelineStage.FAILED
-        session.error_message = "One or more live chunks failed during analysis."
-    elif chunk_stats["ready"] == chunk_stats["total"]:
-        session.status = VideoSession.Status.READY
-        session.pipeline_stage = VideoSession.PipelineStage.READY
-        session.error_message = ""
-    else:
-        session.status = VideoSession.Status.PROCESSING
-        session.pipeline_stage = VideoSession.PipelineStage.ANALYZING
-
-    session.save(update_fields=["settings", "expected_chunk_count", "duration_seconds", "status", "pipeline_stage", "error_message", "updated_at"])
-    emit_event(
-        session,
-        "live.finished",
-        {
-            "session_id": str(session.id),
-            "total_chunks": chunk_stats["total"],
-            "ready_chunks": chunk_stats["ready"],
-            "failed_chunks": chunk_stats["failed"],
-        },
-    )
-    return Status(
-        202,
-        {
-            "session_id": str(session.id),
-            "status": session.status,
-            "total_chunks": chunk_stats["total"],
-            "ready_chunks": chunk_stats["ready"],
-            "failed_chunks": chunk_stats["failed"],
-        },
-    )
 
 
 @api.post("/api/v1/sessions/{session_id}/retry", response={202: dict, 400: ErrorResponse})
@@ -949,7 +891,12 @@ def synthesize_session(request: HttpRequest, session_id: UUID) -> Status:
         return Status(400, ErrorResponse(detail="No ready chunks to synthesize."))
     try:
         result = AgentSocietyRunner().synthesize_session(session)
-        return Status(200, result)
+        artifact = build_artifact_from_session(
+            session,
+            workflow_template=str(session.settings.get("workflow_template", "reading_document")),
+            synthesis_result=result,
+        )
+        return Status(200, {**result, "artifact": artifact_schema(artifact)})
     except (QwenConfigurationError, QwenResponseError) as exc:
         return Status(502, ErrorResponse(detail=str(exc)))
 

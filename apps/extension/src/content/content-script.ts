@@ -1,6 +1,9 @@
 import { findMediaElement, scanDocument } from "./detector";
 import type { CapturedFrame, ReviewCue } from "../types";
 
+type CaptureDetail = "media" | "captions" | "context";
+type ScreenshotFallback = "cropped" | "off";
+
 type ActiveSession = {
   media: HTMLVideoElement | HTMLAudioElement;
   cues: ReviewCue[];
@@ -20,7 +23,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.name === "CAPTURE_FRAME_REQUESTED") {
-    captureFrame(String(message.mediaId ?? ""), Number(message.timestampSeconds ?? 0))
+    captureFrame(
+      String(message.mediaId ?? ""),
+      Number(message.timestampSeconds ?? 0),
+      normalizeCaptureDetail(message.captureDetail),
+      normalizeScreenshotFallback(message.screenshotFallback)
+    )
       .then((payload) => sendResponse({ ok: true, payload }))
       .catch((error) => sendResponse({ ok: false, message: "Could not capture a frame.", diagnostics: String(error) }));
     return true;
@@ -31,21 +39,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       String(message.mediaId ?? ""),
       Number(message.startSeconds ?? 0),
       Number(message.endSeconds ?? 30),
-      Number(message.frameCount ?? 4)
+      Number(message.frameCount ?? 4),
+      normalizeCaptureDetail(message.captureDetail),
+      normalizeScreenshotFallback(message.screenshotFallback)
     )
       .then((payload) => sendResponse({ ok: true, payload }))
       .catch((error) => sendResponse({ ok: false, message: "Multi-frame capture failed.", diagnostics: String(error) }));
-    return true;
-  }
-
-  if (message?.name === "CAPTURE_LIVE_FRAMES_REQUESTED") {
-    captureLiveFrames(
-      String(message.mediaId ?? ""),
-      Number(message.durationSeconds ?? 30),
-      Number(message.frameCount ?? 4)
-    )
-      .then((payload) => sendResponse({ ok: true, payload }))
-      .catch((error) => sendResponse({ ok: false, message: "Live frame capture failed.", diagnostics: String(error) }));
     return true;
   }
 
@@ -78,7 +77,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
-async function captureFrame(mediaId: string, timestampSeconds: number): Promise<CapturedFrame> {
+async function captureFrame(
+  mediaId: string,
+  timestampSeconds: number,
+  captureDetail: CaptureDetail,
+  screenshotFallback: ScreenshotFallback
+): Promise<CapturedFrame> {
   const media = findMediaElement(mediaId);
   if (media instanceof HTMLVideoElement && media.videoWidth > 0 && media.videoHeight > 0) {
     try {
@@ -97,22 +101,24 @@ async function captureFrame(mediaId: string, timestampSeconds: number): Promise<
         note: "Captured a browser-accessible video frame."
       };
     } catch (error) {
-      return fallbackFrame(mediaId, media.currentTime || timestampSeconds, `Frame pixels were blocked by the page: ${String(error)}`);
+      return fallbackFrame(mediaId, media.currentTime || timestampSeconds, `Frame pixels were blocked by the page: ${String(error)}`, captureDetail);
     }
   }
 
-  return fallbackFrame(mediaId, timestampSeconds, "No directly readable video pixels were available; using page context frame.");
+  return fallbackFrame(mediaId, timestampSeconds, "No directly readable video pixels were available; using a limited placeholder frame.", captureDetail);
 }
 
 async function captureMultiFrames(
   mediaId: string,
   startSeconds: number,
   endSeconds: number,
-  frameCount: number
+  frameCount: number,
+  captureDetail: CaptureDetail,
+  screenshotFallback: ScreenshotFallback
 ): Promise<CapturedFrame[]> {
   const media = findMediaElement(mediaId);
   if (!(media instanceof HTMLVideoElement) || media.videoWidth === 0) {
-    return [fallbackFrame(mediaId, startSeconds, "No video element available for multi-frame capture.")];
+    return [fallbackFrame(mediaId, startSeconds, "No video element available for multi-frame capture.", captureDetail)];
   }
 
   const duration = endSeconds - startSeconds;
@@ -127,10 +133,10 @@ async function captureMultiFrames(
     const targetTime = startSeconds + (i * interval) + (interval * 0.5);
     try {
       await seekTo(media, targetTime);
-      const frame = await captureFrameAtCurrentTime(media, mediaId, targetTime);
+      const frame = await captureFrameAtCurrentTime(media, mediaId, targetTime, screenshotFallback);
       frames.push(frame);
     } catch {
-      frames.push(fallbackFrame(mediaId, targetTime, `Frame ${i + 1} capture failed.`));
+      frames.push(fallbackFrame(mediaId, targetTime, `Frame ${i + 1} capture failed.`, captureDetail));
     }
   }
 
@@ -139,40 +145,7 @@ async function captureMultiFrames(
     media.play().catch(() => undefined);
   }
 
-  return frames.length > 0 ? frames : [fallbackFrame(mediaId, startSeconds, "All frame captures failed.")];
-}
-
-async function captureLiveFrames(
-  mediaId: string,
-  durationSeconds: number,
-  frameCount: number
-): Promise<CapturedFrame[]> {
-  const media = findMediaElement(mediaId);
-  const frames: CapturedFrame[] = [];
-  const safeFrameCount = Math.max(1, frameCount);
-  const safeDurationMs = Math.max(1000, durationSeconds * 1000);
-  const intervalMs = safeFrameCount > 1 ? safeDurationMs / (safeFrameCount - 1) : safeDurationMs;
-
-  for (let index = 0; index < safeFrameCount; index++) {
-    if (index > 0) await delay(intervalMs);
-    const timestamp = media?.currentTime ?? index * (durationSeconds / safeFrameCount);
-    if (media instanceof HTMLVideoElement && media.videoWidth > 0) {
-      try {
-        frames.push(await captureFrameAtCurrentTime(media, mediaId, timestamp));
-        continue;
-      } catch {
-        frames.push(fallbackFrame(mediaId, timestamp, `Live frame ${index + 1} used page context fallback.`));
-        continue;
-      }
-    }
-    frames.push(fallbackFrame(mediaId, timestamp, `Live frame ${index + 1} used page context fallback.`));
-  }
-
-  return frames.length > 0 ? frames : [fallbackFrame(mediaId, 0, "No live frames were captured.")];
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return frames.length > 0 ? frames : [fallbackFrame(mediaId, startSeconds, "All frame captures failed.", captureDetail)];
 }
 
 function seekTo(media: HTMLVideoElement, time: number): Promise<void> {
@@ -194,7 +167,12 @@ function seekTo(media: HTMLVideoElement, time: number): Promise<void> {
   });
 }
 
-async function captureFrameAtCurrentTime(media: HTMLVideoElement, mediaId: string, timestampSeconds: number): Promise<CapturedFrame> {
+async function captureFrameAtCurrentTime(
+  media: HTMLVideoElement,
+  mediaId: string,
+  timestampSeconds: number,
+  screenshotFallback: ScreenshotFallback
+): Promise<CapturedFrame> {
   const canvas = document.createElement("canvas");
   canvas.width = Math.min(1280, media.videoWidth);
   canvas.height = Math.max(1, Math.round((canvas.width / media.videoWidth) * media.videoHeight));
@@ -214,24 +192,28 @@ async function captureFrameAtCurrentTime(media: HTMLVideoElement, mediaId: strin
       note: `Frame captured at ${formatClock(media.currentTime)}.`
     };
   } catch {
+    if (screenshotFallback === "off") {
+      throw new Error("Cross-origin frame capture was blocked and screenshot fallback is disabled.");
+    }
     // Cross-origin tainted canvas — request tab screenshot from service worker
     const response = await chrome.runtime.sendMessage({ name: "CAPTURE_TAB_SCREENSHOT" }) as
       { ok: true; payload: { dataUrl: string } } | { ok: false; message: string };
     if (response.ok) {
+      const cropped = await cropScreenshotToMedia(response.payload.dataUrl, media);
       return {
         mediaId,
         timestampSeconds: media.currentTime || timestampSeconds,
-        dataUrl: response.payload.dataUrl,
+        dataUrl: cropped,
         mimeType: "image/jpeg" as const,
         isFallback: true,
-        note: `Tab screenshot at ${formatClock(media.currentTime)} (cross-origin video).`
+        note: `Cropped video-area screenshot at ${formatClock(media.currentTime)} (cross-origin video).`
       };
     }
     throw new Error("Cross-origin frame capture failed and tab screenshot unavailable.");
   }
 }
 
-function fallbackFrame(mediaId: string, timestampSeconds: number, note: string): CapturedFrame {
+function fallbackFrame(mediaId: string, timestampSeconds: number, note: string, captureDetail: CaptureDetail): CapturedFrame {
   const snapshot = scanDocument(document);
   const canvas = document.createElement("canvas");
   canvas.width = 960;
@@ -248,10 +230,16 @@ function fallbackFrame(mediaId: string, timestampSeconds: number, note: string):
   context.fillRect(48, 106, 220, 6);
   context.fillStyle = "#46545c";
   context.font = "22px Arial, sans-serif";
-  wrapText(context, snapshot.title, 48, 160, 840, 30, 3);
+  const title = captureDetail === "context" ? snapshot.title : "Video frame unavailable";
+  wrapText(context, title, 48, 160, 840, 30, 3);
   context.font = "18px Arial, sans-serif";
   context.fillStyle = "#66737a";
-  wrapText(context, snapshot.liveCaptionText[0] || snapshot.visibleText[0] || note, 48, 300, 840, 26, 4);
+  const detail = captureDetail === "context"
+    ? snapshot.liveCaptionText[0] || snapshot.visibleText[0] || note
+    : captureDetail === "captions"
+      ? snapshot.liveCaptionText[0] || note
+      : note;
+  wrapText(context, detail, 48, 300, 840, 26, 4);
   context.fillStyle = "#9ca3a3";
   context.font = "16px Arial, sans-serif";
   context.fillText(`Time ${formatClock(timestampSeconds)}`, 48, 486);
@@ -264,6 +252,49 @@ function fallbackFrame(mediaId: string, timestampSeconds: number, note: string):
     isFallback: true,
     note
   };
+}
+
+function cropScreenshotToMedia(dataUrl: string, media: HTMLVideoElement): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const rect = media.getBoundingClientRect();
+      if (!rect.width || !rect.height || !window.innerWidth || !window.innerHeight) {
+        reject(new Error("Video rectangle unavailable for cropped screenshot fallback."));
+        return;
+      }
+      const scaleX = image.naturalWidth / window.innerWidth;
+      const scaleY = image.naturalHeight / window.innerHeight;
+      const sourceX = Math.max(0, Math.round(rect.left * scaleX));
+      const sourceY = Math.max(0, Math.round(rect.top * scaleY));
+      const sourceWidth = Math.min(image.naturalWidth - sourceX, Math.round(rect.width * scaleX));
+      const sourceHeight = Math.min(image.naturalHeight - sourceY, Math.round(rect.height * scaleY));
+      if (sourceWidth <= 0 || sourceHeight <= 0) {
+        reject(new Error("Video crop was outside the captured tab image."));
+        return;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.min(1280, sourceWidth);
+      canvas.height = Math.max(1, Math.round((canvas.width / sourceWidth) * sourceHeight));
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("Canvas context unavailable."));
+        return;
+      }
+      context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", 0.85));
+    };
+    image.onerror = () => reject(new Error("Could not load tab screenshot for cropping."));
+    image.src = dataUrl;
+  });
+}
+
+function normalizeCaptureDetail(value: unknown): CaptureDetail {
+  return value === "captions" || value === "context" || value === "media" ? value : "media";
+}
+
+function normalizeScreenshotFallback(value: unknown): ScreenshotFallback {
+  return value === "off" || value === "cropped" ? value : "cropped";
 }
 
 function attachDescriptions(mediaId: string, cues: ReviewCue[]) {

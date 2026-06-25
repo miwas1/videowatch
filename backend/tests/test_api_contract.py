@@ -84,11 +84,11 @@ class ChunkReadyRunner:
             chunk=chunk,
             order=0,
             kind=ReadingBlock.Kind.VISUAL_CONTEXT,
-            heading="Live frame",
-            body="The live stream displays current visual context.",
+            heading="Captured frame",
+            body="The recorded segment displays current visual context.",
             start_seconds=chunk.start_seconds,
             end_seconds=chunk.end_seconds,
-            source_evidence=["live frame"],
+            source_evidence=["captured frame"],
             confidence=0.8,
         )
         return {}
@@ -271,15 +271,14 @@ def test_url_ingest_classifies_youtube_access_failures(monkeypatch: pytest.Monke
 
 @pytest.mark.django_db
 @override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
-def test_live_session_stays_open_until_finished(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_chunk_marks_regular_session_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("reader.services.agents.AgentSocietyRunner", lambda: ChunkReadyRunner())
     client = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN)
     session = VideoSession.objects.create(
-        source_url="live://browser-tab",
-        title="Live webinar",
+        source_url="https://example.com/watch?v=django",
+        title="Build a Django Ninja API",
         status=VideoSession.Status.PROCESSING,
         pipeline_stage=VideoSession.PipelineStage.ANALYZING,
-        settings={"source_type": "live_capture", "live_status": "recording"},
     )
 
     response = client.post(
@@ -295,18 +294,8 @@ def test_live_session_stays_open_until_finished(monkeypatch: pytest.MonkeyPatch)
     assert response.status_code == 202
     run_next_job()
     session.refresh_from_db()
-    assert session.status == VideoSession.Status.PROCESSING
-    assert session.pipeline_stage == VideoSession.PipelineStage.ANALYZING
-
-    finish_response = client.post(f"/api/v1/sessions/{session.id}/live/finish", data={}, content_type="application/json")
-
-    assert finish_response.status_code == 202
-    session.refresh_from_db()
     assert session.status == VideoSession.Status.READY
     assert session.pipeline_stage == VideoSession.PipelineStage.READY
-    assert session.expected_chunk_count == 1
-    assert session.duration_seconds == 15
-    assert session.settings["live_status"] == "stopped"
 
 
 @pytest.mark.django_db
@@ -426,6 +415,23 @@ def test_extension_origin_can_create_session_without_token_by_default() -> None:
         content_type="application/json",
     )
     assert response.status_code == 201
+
+
+@pytest.mark.django_db
+@override_settings(DEBUG=False, DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_extension_origin_can_stream_session_events_without_token_by_default() -> None:
+    session = VideoSession.objects.create(
+        source_url="https://example.com/watch?v=django",
+        title="Build a Django Ninja API",
+    )
+
+    response = Client(HTTP_ORIGIN="chrome-extension://describeops-installed").get(
+        f"/api/v1/sessions/{session.id}/events?after=0",
+        HTTP_ACCEPT="text/event-stream",
+    )
+
+    assert response.status_code == 200
+    assert response["Content-Type"] == "text/event-stream"
 
 
 @pytest.mark.django_db

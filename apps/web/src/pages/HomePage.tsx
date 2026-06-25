@@ -273,7 +273,7 @@ export function HomePage({ currentUser, onLogout, onSessionStarted, onOpenSessio
         <div className="extension-section__intro">
           <p className="section-kicker">Browser extension</p>
           <h2>Capture what the server<br /><em>cannot fetch.</em></h2>
-          <p>Use the extension for logged-in videos, live streams, course portals, private embeds, and pages that block backend downloads.</p>
+          <p>Use the extension for logged-in videos, course portals, private embeds, and pages that block backend downloads.</p>
           <a className="btn btn--primary extension-download" href={EXTENSION_DOWNLOAD_PATH} download>
             <DownloadIcon aria-hidden="true" />
             Download Chrome extension

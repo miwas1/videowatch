@@ -14,10 +14,11 @@ import {
   StopIcon,
   TimerIcon
 } from "@radix-ui/react-icons";
-import { DescribeOpsApi } from "./backend-api";
+import { DescribeOpsApi, composeCaptureNotes, composeTranscriptText } from "./backend-api";
 import { blocksToCues, readableKind } from "./cues";
 import { loadSettings, saveSettings } from "./storage";
 import type {
+  ArtifactResponse,
   CapturedFrame,
   CapturedRange,
   DetectedMedia,
@@ -35,7 +36,7 @@ import "./styles.css";
 
 const INITIAL_EVENT_POLL_MS = 2000;
 const MAX_EVENT_POLL_MS = 30000;
-const MAX_LIVE_FRAME_FAILURES = 3;
+const CHUNK_READY_TIMEOUT_MS = 240000;
 
 function SidePanel() {
   const [settings, setSettings] = useState<ExtensionSettings | null>(null);
@@ -55,14 +56,13 @@ function SidePanel() {
   const [urlInput, setUrlInput] = useState("");
   const [capturedRanges, setCapturedRanges] = useState<CapturedRange[]>([]);
   const [autoCapturing, setAutoCapturing] = useState(false);
-  const [liveCapturing, setLiveCapturing] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptResponse | null>(null);
+  const [captureConfirmed, setCaptureConfirmed] = useState(false);
+  const [finalArtifact, setFinalArtifact] = useState<ArtifactResponse | null>(null);
   const [progressText, setProgressText] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const autoCaptureRef = useRef(false);
   const autoStartedRef = useRef(false);
-  const liveCaptureRef = useRef(false);
-  const liveStartedAtRef = useRef<number | null>(null);
   const chunkIndexRef = useRef(0);
   const selectedMediaIdRef = useRef("");
   const sessionRef = useRef<SessionResponse | null>(null);
@@ -92,15 +92,12 @@ function SidePanel() {
   }, [autoCapturing]);
 
   useEffect(() => {
-    liveCaptureRef.current = liveCapturing;
-  }, [liveCapturing]);
-
-  useEffect(() => {
     chunkIndexRef.current = chunkIndex;
   }, [chunkIndex]);
 
   useEffect(() => {
     selectedMediaIdRef.current = selectedMediaId;
+    setCaptureConfirmed(false);
   }, [selectedMediaId]);
 
   useEffect(() => {
@@ -112,17 +109,19 @@ function SidePanel() {
   }, [snapshot]);
 
   useEffect(() => {
-    if (!settings?.autoCapture || autoStartedRef.current || autoCapturing || isBusy(stage) || !api || !snapshot || !focusedMedia) {
+    if (!settings?.autoCapture || !captureConfirmed || autoStartedRef.current || autoCapturing || isBusy(stage) || !api || !snapshot || !focusedMedia) {
       return;
     }
     autoStartedRef.current = true;
     setStatus("Auto mode enabled. Starting capture.");
     void startAutoCapture();
-  }, [api, autoCapturing, focusedMedia, settings?.autoCapture, snapshot, stage]);
+  }, [api, autoCapturing, captureConfirmed, focusedMedia, settings?.autoCapture, snapshot, stage]);
 
   // Task 4: Per-agent progress via SSE polling
   useEffect(() => {
-    if (stage !== "upload" || !session || !settings) return;
+    if (stage !== "upload" || !session || !api) return;
+    const eventsApi = api;
+    const sessionId = session.id;
     let cancelled = false;
     let lastEventId = 0;
     let retryDelayMs = INITIAL_EVENT_POLL_MS;
@@ -130,12 +129,7 @@ function SidePanel() {
     async function pollEvents() {
       while (!cancelled) {
         try {
-          const url = `${settings!.apiBaseUrl}/api/v1/sessions/${session!.id}/events?after=${lastEventId}`;
-          const headers: Record<string, string> = { Accept: "text/event-stream" };
-          if (settings!.apiToken) headers["X-DescribeOps-Token"] = settings!.apiToken;
-          const res = await fetch(url, { headers });
-          if (!res.ok) throw new Error(`Event stream returned ${res.status}`);
-          const text = await res.text();
+          const text = await eventsApi.getEvents(sessionId, lastEventId);
           const lines = text.split("\n");
           for (const line of lines) {
             if (cancelled) break;
@@ -169,7 +163,7 @@ function SidePanel() {
 
     pollEvents();
     return () => { cancelled = true; };
-  }, [stage, session, settings]);
+  }, [api, stage, session]);
 
   async function checkHealth(nextSettings = settings) {
     if (!nextSettings) return;
@@ -186,6 +180,7 @@ function SidePanel() {
     const saved = await saveSettings(draftSettings);
     setSettings(saved);
     setDraftSettings(saved);
+    setCaptureConfirmed(false);
     await checkHealth(saved);
     setStatus("Capture settings saved.");
   }
@@ -206,19 +201,16 @@ function SidePanel() {
     setStage(media ? "idle" : "error");
     setStatus(media ? `${describePlatform(media)} detected: ${media.label}.` : "No playable video was found on this tab.");
     setError(media ? "" : "Start playback on the target page, then scan again.");
-
-    if (media?.source && api) {
-      fetchTranscriptQuietly(media.source);
-    }
   }
 
-  async function fetchTranscriptQuietly(url: string) {
-    if (!api) return;
+  async function ensureTranscript(url: string): Promise<TranscriptResponse | null> {
+    if (!api || transcript?.url === url || settings?.captureDetail === "media") return transcript;
     try {
       const result = await api.fetchTranscript(url);
       setTranscript(result);
+      return result;
     } catch {
-      // Transcript is best-effort
+      return null;
     }
   }
 
@@ -236,23 +228,6 @@ function SidePanel() {
     sessionRef.current = created;
     setSession(created);
     setStatus("Session created. Ready to capture.");
-    return created;
-  }
-
-  async function createLiveSession(nextSnapshot = snapshotRef.current, media = mediaFromSnapshot(nextSnapshot)) {
-    if (!api || !nextSnapshot || !media) return null;
-    const current = sessionRef.current;
-    if (current?.settings?.source_type === "live_capture" && current.settings.live_status === "recording") return current;
-    setStage("session");
-    setStatus("Starting a live DescribeOps session.");
-    const created = await api.createLiveSession(nextSnapshot, media.id);
-    sessionRef.current = created;
-    setSession(created);
-    setDocumentPayload(null);
-    setCapturedRanges([]);
-    setChunkIndex(0);
-    chunkIndexRef.current = 0;
-    setStatus("Live session started.");
     return created;
   }
 
@@ -280,6 +255,10 @@ function SidePanel() {
       await scanActiveTab();
       return false;
     }
+    if (!settings || !captureConfirmed) {
+      setStatus("Review capture details before uploading.");
+      return false;
+    }
 
     try {
       setError("");
@@ -300,7 +279,9 @@ function SidePanel() {
         mediaId: activeMedia.id,
         startSeconds: start,
         endSeconds: end,
-        frameCount
+        frameCount,
+        captureDetail: settings.captureDetail,
+        screenshotFallback: settings.screenshotFallback
       }) as RuntimeResponse<CapturedFrame[]>;
 
       if (!frameResponse.ok) {
@@ -309,20 +290,23 @@ function SidePanel() {
         return false;
       }
 
-      const transcriptSlice = getTranscriptForRange(start, end);
+      let transcriptSource = transcript;
+      if (settings.captureDetail !== "media" && activeMedia.source && !transcriptSource) {
+        transcriptSource = await ensureTranscript(activeMedia.source);
+      }
+      const transcriptSlice = settings.captureDetail !== "media" ? getTranscriptForRange(start, end, transcriptSource) : "";
 
       setStage("upload");
-      setProgressText("Uploading frames to agent society...");
-      setStatus(`Uploading ${frameResponse.payload.length} frames. Agents are analyzing.`);
-      let uploaded: { status: string };
+      setProgressText("Uploading frames for background analysis...");
+      setStatus(`Uploading ${frameResponse.payload.length} frames. Analysis will continue in the background.`);
       try {
-        uploaded = await api.uploadChunk({
+        await api.uploadChunkAsync({
           sessionId: activeSession.id,
           chunkIndex: activeChunkIndex,
           startSeconds: start,
           endSeconds: end,
-          transcriptText: transcriptSlice || transcriptFromSnapshot(activeSnapshot),
-          captureNotes: captureNotes(activeSnapshot, activeMedia, frameResponse.payload[0]),
+          transcriptText: transcriptSlice || composeTranscriptText(activeSnapshot, settings.captureDetail),
+          captureNotes: composeCaptureNotes(activeSnapshot, activeMedia.id, frameResponse.payload[0], settings.captureDetail),
           frames: frameResponse.payload
         });
       } finally {
@@ -333,13 +317,16 @@ function SidePanel() {
       setCapturedRanges((prev) => [...prev, newRange]);
       chunkIndexRef.current = Math.max(chunkIndexRef.current, activeChunkIndex + 1);
       setChunkIndex(chunkIndexRef.current);
-      stopTimer();
-      setProgressText("");
-      setStatus(uploaded.status === "ready" ? "Chunk analyzed. Reading document updated." : `Chunk accepted (${uploaded.status}). Refreshing...`);
+      setStatus(`Chunk ${activeChunkIndex + 1} queued. Waiting for analysis.`);
 
+      await waitForChunkReady(activeSession.id, activeChunkIndex);
       const nextDocument = await api.getDocument(activeSession.id);
       setDocumentPayload(nextDocument);
+      await refreshFinalArtifact(activeSession.id);
+      stopTimer();
+      setProgressText("");
       setStage("review");
+      setStatus("Chunk analyzed. Reading document updated.");
       return true;
     } catch (caught) {
       stopTimer();
@@ -349,15 +336,47 @@ function SidePanel() {
     }
   }
 
-  function getTranscriptForRange(start: number, end: number): string {
-    if (!transcript?.segments.length) return "";
-    const relevant = transcript.segments.filter(
+  function getTranscriptForRange(start: number, end: number, source = transcript): string {
+    if (!source?.segments.length) return "";
+    const relevant = source.segments.filter(
       (seg) => seg.end >= start && seg.start <= end
     );
     return relevant.map((seg) => `[${formatClock(seg.start)}] ${seg.text}`).join("\n");
   }
 
+  async function waitForChunkReady(sessionId: string, activeChunkIndex: number) {
+    if (!api) return;
+    const deadline = Date.now() + CHUNK_READY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const chunks = await api.getChunks(sessionId);
+      const current = chunks.find((chunk) => chunk.chunk_index === activeChunkIndex);
+      if (current?.status === "ready") {
+        setProgressText(`Chunk ${activeChunkIndex + 1} ready. Refreshing document...`);
+        return;
+      }
+      if (current?.status === "failed") {
+        throw new Error(current.error_message || `Chunk ${activeChunkIndex + 1} failed during analysis.`);
+      }
+      const status = current?.status || "queued";
+      setProgressText(`Analyzing chunk ${activeChunkIndex + 1} (${status})...`);
+      await wait(2000);
+    }
+    throw new Error("Chunk analysis timed out. Confirm the backend worker is running.");
+  }
+
+  async function refreshFinalArtifact(sessionId: string) {
+    if (!api) return null;
+    const artifacts = await api.getArtifacts(sessionId);
+    const nextArtifact = selectPrimaryArtifact(artifacts);
+    setFinalArtifact(nextArtifact);
+    return nextArtifact;
+  }
+
   async function startAutoCapture() {
+    if (!captureConfirmed) {
+      setStatus("Review capture details before starting auto-capture.");
+      return;
+    }
     setAutoCapturing(true);
     autoCaptureRef.current = true;
     try {
@@ -404,159 +423,6 @@ function SidePanel() {
     }
   }
 
-  async function startLiveCapture() {
-    if (!api) return;
-    setError("");
-    setLiveCapturing(true);
-    liveCaptureRef.current = true;
-    liveStartedAtRef.current = Date.now();
-    startTimer();
-    try {
-      let activeSnapshot = snapshotRef.current;
-      if (!activeSnapshot) {
-        const response = await chrome.runtime.sendMessage({ name: "PAGE_SCAN_REQUESTED" }) as RuntimeResponse<PageAccessibilitySnapshot>;
-        if (!response.ok) {
-          fail("Could not scan the active tab.", response.message);
-          return;
-        }
-        activeSnapshot = response.payload;
-        snapshotRef.current = activeSnapshot;
-        setSnapshot(activeSnapshot);
-      }
-
-      let media = mediaFromSnapshot(activeSnapshot);
-      if (!media) {
-        fail("Live capture needs a playable video.", "Start playback on the stream, then scan again.");
-        return;
-      }
-      selectedMediaIdRef.current = media.id;
-      setSelectedMediaId(media.id);
-
-      const activeSession = await createLiveSession(activeSnapshot, media);
-      if (!activeSession) return;
-
-      const chunkSeconds = settings?.chunkSeconds ?? 30;
-      const frameCount = settings?.framesPerChunk ?? 4;
-      let consecutiveFrameFailures = 0;
-      setStage("upload");
-      setStatus("Live capture running. DescribeOps will add chunks until you stop.");
-
-      while (liveCaptureRef.current) {
-        const chunkStart = liveElapsedSeconds();
-        const activeChunkIndex = chunkIndexRef.current;
-        setProgressText(`Sampling live chunk ${activeChunkIndex + 1}...`);
-
-        const frameResponse = await chrome.runtime.sendMessage({
-          name: "CAPTURE_LIVE_FRAMES_REQUESTED",
-          mediaId: selectedMediaIdRef.current,
-          durationSeconds: chunkSeconds,
-          frameCount
-        }) as RuntimeResponse<CapturedFrame[]>;
-
-        if (!frameResponse.ok) {
-          consecutiveFrameFailures += 1;
-          if (consecutiveFrameFailures >= MAX_LIVE_FRAME_FAILURES) {
-            setStatus(`Live capture stopped after ${MAX_LIVE_FRAME_FAILURES} frame capture failures.`);
-            break;
-          }
-          setStatus(`Live frame capture failed. Retrying (${consecutiveFrameFailures}/${MAX_LIVE_FRAME_FAILURES}).`);
-          continue;
-        }
-
-        const allFramesFailed = frameResponse.payload.length === 0 || frameResponse.payload.every(isFrameCaptureFailure);
-        if (allFramesFailed) {
-          consecutiveFrameFailures += 1;
-          if (consecutiveFrameFailures >= MAX_LIVE_FRAME_FAILURES) {
-            releaseCapturedFrames(frameResponse.payload);
-            setStatus(`Live capture stopped after ${MAX_LIVE_FRAME_FAILURES} fallback-only frame chunks.`);
-            break;
-          }
-        } else {
-          consecutiveFrameFailures = 0;
-        }
-
-        const scanResponse = await chrome.runtime.sendMessage({ name: "PAGE_SCAN_REQUESTED" }) as RuntimeResponse<PageAccessibilitySnapshot>;
-        if (scanResponse.ok) {
-          activeSnapshot = scanResponse.payload;
-          snapshotRef.current = activeSnapshot;
-          setSnapshot(activeSnapshot);
-          media = mediaFromSnapshot(activeSnapshot) ?? media;
-        }
-
-        const chunkEnd = Math.max(chunkStart + 1, liveElapsedSeconds());
-        setStatus(`Uploading live chunk ${activeChunkIndex + 1}: ${formatClock(chunkStart)} to ${formatClock(chunkEnd)}.`);
-        try {
-          await api.uploadChunkAsync({
-            sessionId: activeSession.id,
-            chunkIndex: activeChunkIndex,
-            startSeconds: chunkStart,
-            endSeconds: chunkEnd,
-            transcriptText: transcriptFromSnapshot(activeSnapshot),
-            captureNotes: `${captureNotes(activeSnapshot, media, frameResponse.payload[0])}\nCapture mode: live stream`,
-            frames: frameResponse.payload
-          });
-        } finally {
-          releaseCapturedFrames(frameResponse.payload);
-        }
-
-        const newRange: CapturedRange = { start: chunkStart, end: chunkEnd, chunkIndex: activeChunkIndex };
-        setCapturedRanges((prev) => [...prev, newRange]);
-        chunkIndexRef.current = activeChunkIndex + 1;
-        setChunkIndex(chunkIndexRef.current);
-        setStatus(`Live chunk ${activeChunkIndex + 1} queued. Continuing capture.`);
-      }
-    } catch (caught) {
-      fail("Live capture failed.", String(caught));
-    } finally {
-      setLiveCapturing(false);
-      liveCaptureRef.current = false;
-      setProgressText("");
-      if (sessionRef.current?.settings?.source_type === "live_capture" && sessionRef.current.settings.live_status === "recording") {
-        await finalizeLiveSession();
-      }
-    }
-  }
-
-  async function stopLiveCapture() {
-    liveCaptureRef.current = false;
-    setLiveCapturing(false);
-    setStatus("Stopping live capture after the current sample.");
-  }
-
-  async function finalizeLiveSession() {
-    stopTimer();
-    setProgressText("");
-    const liveSession = sessionRef.current;
-    if (!api || !liveSession) {
-      setStatus("Live capture stopped.");
-      return;
-    }
-    try {
-      setStage("upload");
-      setStatus("Finalizing live session.");
-      const result = await api.finishLiveSession(liveSession.id);
-      const nextSession = await api.getSessionStatus(liveSession.id);
-      setSession(nextSession);
-      sessionRef.current = nextSession;
-      if (result.status === "ready") {
-        const nextDocument = await api.getDocument(liveSession.id);
-        setDocumentPayload(nextDocument);
-        setStage("review");
-        setStatus(`Live capture ready with ${result.ready_chunks} analyzed chunks.`);
-      } else {
-        setStatus(`Live capture stopped. ${result.ready_chunks}/${result.total_chunks} chunks are ready.`);
-        pollForCompletion(liveSession.id);
-      }
-    } catch (caught) {
-      fail("Could not finalize live capture.", String(caught));
-    }
-  }
-
-  function liveElapsedSeconds(): number {
-    const startedAt = liveStartedAtRef.current ?? Date.now();
-    return Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  }
-
   async function synthesizeSession(sessionId: string | undefined) {
     if (!api || !sessionId) return;
     setStage("upload");
@@ -565,6 +431,11 @@ function SidePanel() {
       const result = await api.synthesize(sessionId);
       const nextDocument = await api.getDocument(sessionId);
       setDocumentPayload(nextDocument);
+      if (result.artifact) {
+        setFinalArtifact(result.artifact);
+      } else {
+        await refreshFinalArtifact(sessionId);
+      }
       setStage("review");
       setProgressText("");
       if (result.summary) {
@@ -593,6 +464,7 @@ function SidePanel() {
     setStatus("Refreshing the reading document.");
     try {
       setDocumentPayload(await api.getDocument(session.id));
+      await refreshFinalArtifact(session.id);
       setStatus("Reading document refreshed.");
     } catch (caught) {
       fail("Could not refresh the document.", String(caught));
@@ -602,12 +474,12 @@ function SidePanel() {
   async function exportDocument() {
     if (!api || !session) return;
     try {
-      const markdown = await api.exportMarkdown(session.id);
+      const markdown = finalArtifact?.markdown || await api.exportMarkdown(session.id);
       const blob = new Blob([markdown], { type: "text/markdown" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${session.title || "reading-document"}.md`;
+      a.download = `${finalArtifact?.title || session.title || "reading-document"}.md`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -649,6 +521,7 @@ function SidePanel() {
           setProgressText("");
           const doc = await api!.getDocument(sessionId);
           setDocumentPayload(doc);
+          await refreshFinalArtifact(sessionId);
           setStage("review");
           setStatus(`Document ready: ${doc.blocks.length} blocks from "${status.title}".`);
           return;
@@ -786,6 +659,18 @@ function SidePanel() {
         <div className="primary-zone">
           <MediaSummary snapshot={snapshot} focusedMedia={focusedMedia} selectedMediaId={selectedMediaId} onSelect={setSelectedMediaId} />
 
+          {settings && (
+            <CaptureConsentPanel
+              settings={settings}
+              focusedMedia={focusedMedia}
+              confirmed={captureConfirmed}
+              onConfirm={() => {
+                setCaptureConfirmed(true);
+                setStatus("Capture approved for the current settings.");
+              }}
+            />
+          )}
+
           {capturedRanges.length > 0 && (
             <CoverageBar
               ranges={capturedRanges}
@@ -803,28 +688,17 @@ function SidePanel() {
               <ReloadIcon aria-hidden="true" />
               Scan
             </button>
-            <button type="button" className="button primary" onClick={() => captureAndAnalyze()} disabled={!api || !focusedMedia || isBusy(stage) || autoCapturing}>
+            <button type="button" className="button primary" onClick={() => captureAndAnalyze()} disabled={!api || !focusedMedia || !captureConfirmed || isBusy(stage) || autoCapturing}>
               <PlayIcon aria-hidden="true" />
               Capture
             </button>
-            {liveCapturing ? (
-              <button type="button" className="button danger" onClick={stopLiveCapture}>
-                <StopIcon aria-hidden="true" />
-                Stop live
-              </button>
-            ) : (
-              <button type="button" className="button accent" onClick={startLiveCapture} disabled={!api || !focusedMedia || (isBusy(stage) && !liveCapturing) || autoCapturing}>
-                <TimerIcon aria-hidden="true" />
-                Live
-              </button>
-            )}
             {autoCapturing ? (
               <button type="button" className="button danger" onClick={stopAutoCapture}>
                 <StopIcon aria-hidden="true" />
                 Stop auto
               </button>
             ) : (
-              <button type="button" className="button accent" onClick={startAutoCapture} disabled={!api || !focusedMedia || isBusy(stage) || liveCapturing}>
+              <button type="button" className="button accent" onClick={startAutoCapture} disabled={!api || !focusedMedia || !captureConfirmed || isBusy(stage)}>
                 <TimerIcon aria-hidden="true" />
                 Auto
               </button>
@@ -903,6 +777,8 @@ function SidePanel() {
         </section>
       )}
 
+      <FinalArtifactReview artifact={finalArtifact} />
+
       <DocumentReview
         documentPayload={documentPayload}
         editingBlockId={editingBlockId}
@@ -925,6 +801,44 @@ function HealthPill({ health }: { health: HealthResponse | null }) {
       {health.qwen_configured ? <CheckCircledIcon aria-hidden="true" /> : <ExclamationTriangleIcon aria-hidden="true" />}
       {health.qwen_configured ? health.visual_model : "No Qwen key"}
     </span>
+  );
+}
+
+function CaptureConsentPanel({
+  settings,
+  focusedMedia,
+  confirmed,
+  onConfirm
+}: {
+  settings: ExtensionSettings;
+  focusedMedia: DetectedMedia | null;
+  confirmed: boolean;
+  onConfirm: () => void;
+}) {
+  const captionsIncluded = settings.captureDetail !== "media";
+  const pageContextIncluded = settings.captureDetail === "context";
+  return (
+    <section className={confirmed ? "consent-panel consent-panel--confirmed" : "consent-panel"} aria-label="Capture data review">
+      <div className="section-heading">
+        <div>
+          <p className="label">Before upload</p>
+          <h2>{confirmed ? "Capture approved" : "Review capture details"}</h2>
+        </div>
+        {confirmed ? <CheckCircledIcon aria-hidden="true" /> : <ExclamationTriangleIcon aria-hidden="true" />}
+      </div>
+      <dl className="consent-grid">
+        <div><dt>Frames</dt><dd>{settings.framesPerChunk} per chunk</dd></div>
+        <div><dt>Captions</dt><dd>{captionsIncluded ? "Included" : "Off"}</dd></div>
+        <div><dt>Page text</dt><dd>{pageContextIncluded ? "Included" : "Off"}</dd></div>
+        <div><dt>Fallback</dt><dd>{settings.screenshotFallback === "cropped" ? "Cropped video area" : "Off"}</dd></div>
+        <div><dt>Destination</dt><dd title={settings.apiBaseUrl}>{settings.apiBaseUrl.replace(/^https?:\/\//, "")}</dd></div>
+        <div><dt>Media</dt><dd>{focusedMedia ? focusedMedia.label : "None selected"}</dd></div>
+      </dl>
+      <button type="button" className={confirmed ? "button subtle" : "button primary"} onClick={onConfirm} disabled={!focusedMedia}>
+        <CheckCircledIcon aria-hidden="true" />
+        {confirmed ? "Approved" : "Allow capture"}
+      </button>
+    </section>
   );
 }
 
@@ -992,7 +906,7 @@ function MediaSummary({
       <section className="empty-state" aria-label="No scan yet">
         <ReaderIcon aria-hidden="true" />
         <h2>No tab scanned</h2>
-        <p>Scan the current page to find playable video, captions, transcript hints, and visible text.</p>
+        <p>Scan the current page to find playable video, captions, transcript hints, and selectable page context.</p>
       </section>
     );
   }
@@ -1055,6 +969,27 @@ function ConnectionPanel({
         <GearIcon aria-hidden="true" />
       </div>
       <label className="field">
+        <span>Capture detail</span>
+        <select
+          value={settings?.captureDetail ?? "media"}
+          onChange={(event) => settings && onChange({ ...settings, captureDetail: event.currentTarget.value as ExtensionSettings["captureDetail"] })}
+        >
+          <option value="media">Media only</option>
+          <option value="captions">Media + captions</option>
+          <option value="context">Media + page context</option>
+        </select>
+      </label>
+      <label className="field">
+        <span>Screenshot fallback</span>
+        <select
+          value={settings?.screenshotFallback ?? "cropped"}
+          onChange={(event) => settings && onChange({ ...settings, screenshotFallback: event.currentTarget.value as ExtensionSettings["screenshotFallback"] })}
+        >
+          <option value="cropped">Cropped video area</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+      <label className="field">
         <span>Chunk seconds</span>
         <input
           type="number"
@@ -1080,12 +1015,44 @@ function ConnectionPanel({
           checked={Boolean(settings?.autoCapture)}
           onChange={(event) => settings && onChange({ ...settings, autoCapture: event.currentTarget.checked })}
         />
-        <span>Start in auto mode</span>
+        <span>Auto-capture after approval</span>
       </label>
       <button type="button" className="button subtle" onClick={onSave} disabled={disabled}>
         <CheckCircledIcon aria-hidden="true" />
         Save
       </button>
+    </section>
+  );
+}
+
+function FinalArtifactReview({ artifact }: { artifact: ArtifactResponse | null }) {
+  if (!artifact) return null;
+  const sections = artifact.payload.sections ?? [];
+  return (
+    <section className="final-artifact" aria-labelledby="final-artifact-title">
+      <div className="section-heading">
+        <div>
+          <p className="label">Final document</p>
+          <h2 id="final-artifact-title">{artifact.title || "Synthesized document"}</h2>
+        </div>
+        <span className="badge">{artifact.workflow_template.replace(/_/g, " ")}</span>
+      </div>
+      {artifact.summary ? <p className="artifact-summary">{artifact.summary}</p> : null}
+      {sections.length > 0 ? (
+        <div className="artifact-section-list">
+          {sections.map((section, index) => (
+            <article className="artifact-section" key={`${section.heading}-${index}`}>
+              <header>
+                <h3>{section.heading || `Section ${index + 1}`}</h3>
+                <span>{formatClock(section.start_seconds)}-{formatClock(section.end_seconds)}</span>
+              </header>
+              <p>{section.body}</p>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <pre className="artifact-markdown">{artifact.markdown}</pre>
+      )}
     </section>
   );
 }
@@ -1400,34 +1367,14 @@ function isBusy(stage: PanelStage): boolean {
   return stage === "scan" || stage === "session" || stage === "capture" || stage === "upload";
 }
 
-function transcriptFromSnapshot(snapshot: PageAccessibilitySnapshot): string {
-  return [
-    ...snapshot.liveCaptionText.map((item) => `Live caption: ${item}`),
-    ...snapshot.transcriptText.map((item) => `Transcript: ${item}`),
-    ...snapshot.visibleText.slice(0, 12).map((item) => `Visible text: ${item}`)
-  ].join("\n");
-}
-
-function captureNotes(snapshot: PageAccessibilitySnapshot, media: DetectedMedia, frame: CapturedFrame): string {
-  return [
-    `Platform: ${snapshot.platform}`,
-    `Page title: ${snapshot.title}`,
-    `Media: ${media.label}`,
-    `Media kind: ${media.kind}`,
-    `Frame: ${frame.note}`,
-    `Headings: ${snapshot.headings.slice(0, 6).join(" | ") || "none"}`,
-    `Captions detected: ${snapshot.captions.join(" | ") || "none"}`
-  ].join("\n");
+function selectPrimaryArtifact(artifacts: ArtifactResponse[]): ArtifactResponse | null {
+  return artifacts.find((artifact) => artifact.workflow_template === "reading_document") ?? artifacts[0] ?? null;
 }
 
 function releaseCapturedFrames(frames: CapturedFrame[]): void {
   for (const frame of frames) {
     frame.dataUrl = "";
   }
-}
-
-function isFrameCaptureFailure(frame: CapturedFrame): boolean {
-  return frame.isFallback && !/tab screenshot/i.test(frame.note);
 }
 
 function describePlatform(media: DetectedMedia): string {

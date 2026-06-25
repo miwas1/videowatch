@@ -44,12 +44,17 @@ export type CapturedFrame = {
   note: string;
 };
 
+export type CaptureDetail = "media" | "captions" | "context";
+export type ScreenshotFallback = "cropped" | "off";
+
 export type ExtensionSettings = {
   apiBaseUrl: string;
   apiToken: string;
   chunkSeconds: number;
   framesPerChunk: number;
   autoCapture: boolean;
+  captureDetail: CaptureDetail;
+  screenshotFallback: ScreenshotFallback;
 };
 
 export type SessionResponse = {
@@ -104,6 +109,18 @@ export type ChunkResponse = {
   timeline: TimelineMoment[];
 };
 
+export type ChunkSummary = {
+  id: string;
+  chunk_index: number;
+  start_seconds: number;
+  end_seconds: number;
+  status: "accepted" | "analyzing" | "ready" | "failed" | string;
+  error_message: string;
+  frame_count: number;
+  block_count: number;
+  latency_ms: number | null;
+};
+
 export type ReadingDocumentResponse = {
   session: SessionResponse;
   blocks: ReadingBlock[];
@@ -145,11 +162,28 @@ export type TranscriptResponse = {
   segment_count: number;
 };
 
+export type ArtifactResponse = {
+  id: string;
+  artifact_type: string;
+  workflow_template: string;
+  title: string;
+  summary: string;
+  markdown: string;
+  payload: {
+    sections?: { heading: string; body: string; start_seconds: number; end_seconds: number; kind: string }[];
+    synthesis?: unknown;
+    [key: string]: unknown;
+  };
+  created_at: string;
+  updated_at: string;
+};
+
 export type SynthesisResponse = {
   title?: string;
   sections?: { heading: string; body: string; start_seconds: number; end_seconds: number; kind: string }[];
   summary?: string;
   skipped?: boolean;
+  artifact?: ArtifactResponse;
 };
 
 export type PanelStage = "idle" | "scan" | "session" | "capture" | "upload" | "review" | "error";

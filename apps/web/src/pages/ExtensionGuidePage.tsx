@@ -40,8 +40,8 @@ const useSteps = [
   },
   {
     icon: PlayIcon,
-    title: "Choose capture mode",
-    body: "Use Capture for one segment, Auto for recorded videos with a known duration, or Live for streams and webinars.",
+    title: "Approve and capture",
+    body: "Review what will be uploaded, then use Capture for one segment or Auto for a recorded video with a known duration.",
   },
   {
     icon: ReaderIcon,
@@ -52,9 +52,9 @@ const useSteps = [
 
 const troubleshooting = [
   ["No video found", "Start playback first, then scan again. Some pages do not create the video element until playback starts."],
-  ["Frames look generic", "The page may block direct video pixels. DescribeOps falls back to a tab screenshot or visible page context."],
+  ["Frames look generic", "The page may block direct video pixels. DescribeOps can use a cropped video-area screenshot or a limited placeholder."],
   ["Backend offline", "Use Check in the extension popup. The extension is preconfigured for videowatch.platinexsolutions.com.ng."],
-  ["Live capture is slow", "Use shorter chunks for faster updates, or fewer frames per chunk for lighter uploads."],
+  ["Auto capture is slow", "Use shorter chunks for faster updates, or fewer frames per chunk for lighter uploads."],
 ];
 
 export function ExtensionGuidePage({ currentUser, onBack, onLogout }: Props) {
@@ -85,7 +85,7 @@ export function ExtensionGuidePage({ currentUser, onBack, onLogout }: Props) {
         <h1>Install, connect,<br /><em>capture.</em></h1>
         <p>
           Use the browser extension when a video plays in Chrome but cannot be downloaded by the backend.
-          It is the best path for logged-in pages, live streams, course portals, and embedded players.
+          It is the best path for logged-in pages, course portals, and embedded players.
         </p>
         <div className="guide-hero__actions">
           <a className="btn btn--primary" href={EXTENSION_DOWNLOAD_PATH} download>
@@ -125,7 +125,7 @@ export function ExtensionGuidePage({ currentUser, onBack, onLogout }: Props) {
         <div className="guide-terminal" aria-label="Connection values">
           <p><span>Backend URL</span><code>https://videowatch.platinexsolutions.com.ng</code></p>
           <p><span>Auth</span><code>Automatic extension access</code></p>
-          <p><span>Uploads</span><code>Frames, captions, and live chunks</code></p>
+          <p><span>Uploads</span><code>Approved frames and selected text context</code></p>
         </div>
       </section>
 
@@ -135,7 +135,7 @@ export function ExtensionGuidePage({ currentUser, onBack, onLogout }: Props) {
             <p className="section-kicker">Use</p>
             <h2>Capture the page you can already watch.</h2>
           </div>
-          <p>Keep the video page open while DescribeOps samples frames, captions, visible text, and timing.</p>
+          <p>Keep the video page open while DescribeOps samples approved frames, timing, and the text context you choose.</p>
         </div>
         <div className="guide-use-grid">
           {useSteps.map((step) => {
@@ -154,12 +154,12 @@ export function ExtensionGuidePage({ currentUser, onBack, onLogout }: Props) {
       <section className="guide-section guide-split guide-split--dark">
         <div>
           <p className="section-kicker">Mode picker</p>
-          <h2>Recorded video or live stream.</h2>
+          <h2>Recorded video capture.</h2>
         </div>
         <dl className="guide-mode-list">
           <div><dt>Capture</dt><dd>Analyze the current segment around the playhead.</dd></div>
           <div><dt>Auto</dt><dd>Walk through a recorded video with a known duration.</dd></div>
-          <div><dt>Live</dt><dd>Sample the active stream continuously until you stop it.</dd></div>
+          <div><dt>Privacy</dt><dd>Choose media only, media plus captions, or media plus page context.</dd></div>
           <div><dt>Attach</dt><dd>Play generated spoken cues back over the source video.</dd></div>
         </dl>
       </section>
