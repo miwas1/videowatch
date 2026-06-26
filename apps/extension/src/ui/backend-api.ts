@@ -147,6 +147,9 @@ export class DescribeOpsApi {
     if (init.contentType !== null) {
       headers.set("Content-Type", init.contentType ?? "application/json");
     }
+    if (init.auth !== false && this.settings.apiToken) {
+      headers.set("X-DescribeOps-Token", this.settings.apiToken);
+    }
 
     const response = await fetch(`${this.settings.apiBaseUrl}${path}`, {
       ...init,

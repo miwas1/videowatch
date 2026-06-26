@@ -969,6 +969,15 @@ function ConnectionPanel({
         <GearIcon aria-hidden="true" />
       </div>
       <label className="field">
+        <span>API token</span>
+        <input
+          type="password"
+          value={settings?.apiToken ?? ""}
+          placeholder="X-DescribeOps-Token"
+          onChange={(event) => settings && onChange({ ...settings, apiToken: event.currentTarget.value })}
+        />
+      </label>
+      <label className="field">
         <span>Capture detail</span>
         <select
           value={settings?.captureDetail ?? "media"}

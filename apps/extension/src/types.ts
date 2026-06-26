@@ -49,6 +49,7 @@ export type ScreenshotFallback = "cropped" | "off";
 
 export type ExtensionSettings = {
   apiBaseUrl: string;
+  apiToken: string;
   chunkSeconds: number;
   framesPerChunk: number;
   autoCapture: boolean;
