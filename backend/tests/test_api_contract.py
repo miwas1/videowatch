@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,11 +9,12 @@ from typing import Any
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, override_settings
 from PIL import Image
 
-from reader.models import ProcessingJob, ReadingBlock, TimelineMoment, UserApiToken, VideoChunk
+from reader.models import GeneratedArtifact, ProcessingJob, ReadingBlock, StoredAsset, TimelineMoment, UserApiToken, VideoChunk
 from reader.models import VideoSession
 from reader.services.jobs import run_next_job
 from reader.services.media_ingest import YouTubeAccessError, is_youtube_access_error
@@ -31,6 +33,10 @@ def png_frame() -> SimpleUploadedFile:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return SimpleUploadedFile("frame.png", buffer.getvalue(), content_type="image/png")
+
+
+def webm_audio() -> SimpleUploadedFile:
+    return SimpleUploadedFile("audio.webm", b"webm-audio-placeholder", content_type="audio/webm")
 
 
 def create_user_token(user, raw_token: str) -> str:
@@ -90,6 +96,47 @@ class ChunkReadyRunner:
             end_seconds=chunk.end_seconds,
             source_evidence=["captured frame"],
             confidence=0.8,
+        )
+        return {}
+
+
+class TranscriptAwareRunner:
+    def process_chunk(self, chunk: VideoChunk) -> dict[str, Any]:
+        assert "spoken hammer safety tip" in chunk.transcript_text
+        chunk.status = VideoChunk.Status.READY
+        chunk.latency_ms = 25
+        chunk.save(update_fields=["status", "latency_ms", "updated_at"])
+        ReadingBlock.objects.create(
+            session=chunk.session,
+            chunk=chunk,
+            order=0,
+            kind=ReadingBlock.Kind.EXPLANATION,
+            heading="Audio-backed instruction",
+            body="The transcript says a spoken hammer safety tip.",
+            start_seconds=chunk.start_seconds,
+            end_seconds=chunk.end_seconds,
+            source_evidence=["audio transcript"],
+            confidence=0.85,
+        )
+        return {}
+
+
+class FallbackRunner:
+    def process_chunk(self, chunk: VideoChunk) -> dict[str, Any]:
+        chunk.status = VideoChunk.Status.READY
+        chunk.latency_ms = 25
+        chunk.save(update_fields=["status", "latency_ms", "updated_at"])
+        ReadingBlock.objects.create(
+            session=chunk.session,
+            chunk=chunk,
+            order=0,
+            kind=ReadingBlock.Kind.VISUAL_CONTEXT,
+            heading="Frame-only fallback",
+            body="Analysis continued even though audio transcription failed.",
+            start_seconds=chunk.start_seconds,
+            end_seconds=chunk.end_seconds,
+            source_evidence=["captured frame"],
+            confidence=0.75,
         )
         return {}
 
@@ -202,6 +249,208 @@ def test_session_chunk_document_and_correction_flow(monkeypatch: pytest.MonkeyPa
     )
     assert correction_response.status_code == 200
     assert correction_response.json()["block"]["is_user_edited"] is True
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN, MEDIA_ROOT="/tmp/describeops-test-media")
+def test_async_chunk_upload_accepts_audio_and_records_assets() -> None:
+    client = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN)
+    create_response = client.post(
+        "/api/v1/sessions",
+        data={
+            "source_url": "https://private.example.com/course/video",
+            "title": "Private course clip",
+            "duration_seconds": 90,
+        },
+        content_type="application/json",
+    )
+    assert create_response.status_code == 201
+    session_id = create_response.json()["id"]
+
+    upload_response = client.post(
+        f"/api/v1/sessions/{session_id}/chunks/async",
+        data={
+            "chunk_index": "0",
+            "start_seconds": "0",
+            "end_seconds": "30",
+            "transcript_text": "",
+            "capture_notes": "Extension captured an authenticated video.",
+            "frames": [png_frame()],
+            "audio_chunks": [webm_audio()],
+        },
+    )
+
+    assert upload_response.status_code == 202
+    session = VideoSession.objects.get(id=session_id)
+    assert session.source_fingerprint
+    assert session.canonical_video_id
+    assert StoredAsset.objects.filter(session=session, asset_type=StoredAsset.AssetType.FRAME).count() == 1
+    audio_asset = StoredAsset.objects.get(session=session, asset_type=StoredAsset.AssetType.AUDIO_CHUNK)
+    assert audio_asset.object_key.endswith(".webm")
+    assert audio_asset.canonical_video_id == session.canonical_video_id
+    assert ProcessingJob.objects.filter(session=session, job_type=ProcessingJob.JobType.CHUNK_ANALYSIS).count() == 1
+
+
+@pytest.mark.django_db
+@override_settings(
+    DESCRIBEOPS_API_TOKEN=TOKEN,
+    MEDIA_ROOT="/tmp/describeops-test-media",
+    DASHSCOPE_API_KEY="configured",
+    QWEN_AUDIO_TRANSCRIPTION_MODEL="fake-audio",
+)
+def test_async_audio_chunk_is_transcribed_and_used_before_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeAudioQwen:
+        def transcribe_audio(self, *, data: bytes, filename: str, content_type: str, model: str | None = None):
+            assert data == b"webm-audio-placeholder"
+            assert filename.endswith(".webm")
+            assert content_type == "audio/webm"
+            return SimpleNamespace(
+                model="fake-audio",
+                content={"text": "spoken hammer safety tip", "raw": {"text": "spoken hammer safety tip"}},
+                request_id="audio-request-1",
+                latency_ms=12,
+            )
+
+    monkeypatch.setattr("reader.services.audio.QwenClient", FakeAudioQwen)
+    monkeypatch.setattr("reader.services.agents.AgentSocietyRunner", lambda: TranscriptAwareRunner())
+
+    client = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN)
+    create_response = client.post(
+        "/api/v1/sessions",
+        data={
+            "source_url": "https://private.example.com/course/audio-video",
+            "title": "Private audio clip",
+            "duration_seconds": 30,
+        },
+        content_type="application/json",
+    )
+    assert create_response.status_code == 201
+    session_id = create_response.json()["id"]
+
+    upload_response = client.post(
+        f"/api/v1/sessions/{session_id}/chunks/async",
+        data={
+            "chunk_index": "0",
+            "start_seconds": "0",
+            "end_seconds": "30",
+            "transcript_text": "",
+            "capture_notes": "Authenticated media capture.",
+            "frames": [png_frame()],
+            "audio_chunks": [webm_audio()],
+        },
+    )
+
+    assert upload_response.status_code == 202
+    drain_jobs()
+
+    chunk = VideoChunk.objects.get(session_id=session_id, chunk_index=0)
+    assert "[Audio transcript 00:00 - 00:30]" in chunk.transcript_text
+    assert "spoken hammer safety tip" in chunk.transcript_text
+    transcript_asset = StoredAsset.objects.get(session_id=session_id, asset_type=StoredAsset.AssetType.TRANSCRIPT)
+    with default_storage.open(transcript_asset.object_key, "rb") as stored_file:
+        transcript_payload = json.loads(stored_file.read().decode("utf-8"))
+    assert transcript_payload["text"] == "spoken hammer safety tip"
+    assert transcript_payload["audio_object_key"].endswith(".webm")
+    session = VideoSession.objects.get(id=session_id)
+    assert session.events.filter(event_type="audio.transcribed").exists()
+    assert session.status == VideoSession.Status.READY
+
+
+@pytest.mark.django_db
+@override_settings(
+    DESCRIBEOPS_API_TOKEN=TOKEN,
+    MEDIA_ROOT="/tmp/describeops-test-media",
+    DASHSCOPE_API_KEY="configured",
+    QWEN_AUDIO_TRANSCRIPTION_MODEL="fake-audio",
+)
+def test_audio_transcription_failure_does_not_block_chunk_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingAudioQwen:
+        def transcribe_audio(self, **kwargs):
+            raise RuntimeError("audio service unavailable")
+
+    monkeypatch.setattr("reader.services.audio.QwenClient", FailingAudioQwen)
+    monkeypatch.setattr("reader.services.agents.AgentSocietyRunner", lambda: FallbackRunner())
+
+    client = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN)
+    create_response = client.post(
+        "/api/v1/sessions",
+        data={
+            "source_url": "https://private.example.com/course/fallback-video",
+            "title": "Private fallback clip",
+            "duration_seconds": 30,
+        },
+        content_type="application/json",
+    )
+    assert create_response.status_code == 201
+    session_id = create_response.json()["id"]
+
+    upload_response = client.post(
+        f"/api/v1/sessions/{session_id}/chunks/async",
+        data={
+            "chunk_index": "0",
+            "start_seconds": "0",
+            "end_seconds": "30",
+            "frames": [png_frame()],
+            "audio_chunks": [webm_audio()],
+        },
+    )
+
+    assert upload_response.status_code == 202
+    drain_jobs()
+
+    session = VideoSession.objects.get(id=session_id)
+    chunk = VideoChunk.objects.get(session=session, chunk_index=0)
+    assert chunk.status == VideoChunk.Status.READY
+    assert session.status == VideoSession.Status.READY
+    assert not StoredAsset.objects.filter(session=session, asset_type=StoredAsset.AssetType.TRANSCRIPT).exists()
+    assert session.events.filter(event_type="audio.failed").exists()
+
+
+@pytest.mark.django_db
+@override_settings(DESCRIBEOPS_API_TOKEN=TOKEN)
+def test_create_session_reuses_ready_canonical_artifacts() -> None:
+    client = Client(HTTP_X_DESCRIBEOPS_TOKEN=TOKEN)
+    payload = {
+        "source_url": "https://private.example.com/course/reused-video",
+        "title": "Reusable private lesson",
+        "duration_seconds": 120,
+    }
+    first_response = client.post("/api/v1/sessions", data=payload, content_type="application/json")
+    assert first_response.status_code == 201
+    first_session = VideoSession.objects.get(id=first_response.json()["id"])
+    first_session.status = VideoSession.Status.READY
+    first_session.pipeline_stage = VideoSession.PipelineStage.READY
+    first_session.save(update_fields=["status", "pipeline_stage", "updated_at"])
+    artifact = GeneratedArtifact.objects.create(
+        session=first_session,
+        artifact_type=GeneratedArtifact.ArtifactType.READING_DOCUMENT,
+        workflow_template="reading_document",
+        title="Reusable private lesson",
+        summary="Cached summary.",
+        markdown="# Cached artifact",
+        payload={"sections": []},
+    )
+    StoredAsset.objects.create(
+        canonical_video=first_session.canonical_video,
+        session=first_session,
+        artifact=artifact,
+        asset_type=StoredAsset.AssetType.FINAL_ARTIFACT,
+        object_key="final/source-session/reading_document.md",
+        content_type="text/markdown",
+        checksum="a" * 64,
+        byte_size=18,
+    )
+
+    second_response = client.post("/api/v1/sessions", data=payload, content_type="application/json")
+
+    assert second_response.status_code == 201
+    second_session = VideoSession.objects.get(id=second_response.json()["id"])
+    assert second_session.status == VideoSession.Status.READY
+    copied_artifact = second_session.artifacts.get(workflow_template="reading_document")
+    assert copied_artifact.markdown == "# Cached artifact"
+    reused_asset = second_session.stored_assets.get(asset_type=StoredAsset.AssetType.FINAL_ARTIFACT)
+    assert reused_asset.object_key == "final/source-session/reading_document.md"
+    assert reused_asset.metadata["reused_from_session_id"] == str(first_session.id)
 
 
 @pytest.mark.django_db

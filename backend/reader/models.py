@@ -6,6 +6,23 @@ from django.conf import settings
 from django.db import models
 
 
+class CanonicalVideo(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    fingerprint = models.CharField(max_length=96, unique=True, db_index=True)
+    canonical_url = models.TextField(blank=True)
+    title = models.CharField(max_length=500, blank=True)
+    duration_seconds = models.FloatField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return self.title or self.canonical_url or self.fingerprint
+
+
 class VideoSession(models.Model):
     class Status(models.TextChoices):
         CREATED = "created", "Created"
@@ -24,6 +41,8 @@ class VideoSession(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="video_sessions", on_delete=models.CASCADE, null=True, blank=True)
+    canonical_video = models.ForeignKey(CanonicalVideo, related_name="sessions", on_delete=models.SET_NULL, null=True, blank=True)
+    source_fingerprint = models.CharField(max_length=96, blank=True, db_index=True)
     source_url = models.TextField(blank=True)
     title = models.CharField(max_length=500, blank=True)
     page_title = models.CharField(max_length=500, blank=True)
@@ -252,3 +271,39 @@ class UserApiToken(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class StoredAsset(models.Model):
+    class AssetType(models.TextChoices):
+        SOURCE_VIDEO = "source_video", "Source video"
+        AUDIO_CHUNK = "audio_chunk", "Audio chunk"
+        TRANSCRIPT = "transcript", "Transcript"
+        FRAME = "frame", "Frame"
+        QWEN_OUTPUT = "qwen_output", "Qwen output"
+        EVIDENCE_MANIFEST = "evidence_manifest", "Evidence manifest"
+        FINAL_ARTIFACT = "final_artifact", "Final artifact"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    canonical_video = models.ForeignKey(CanonicalVideo, related_name="assets", on_delete=models.CASCADE, null=True, blank=True)
+    session = models.ForeignKey(VideoSession, related_name="stored_assets", on_delete=models.CASCADE, null=True, blank=True)
+    chunk = models.ForeignKey(VideoChunk, related_name="stored_assets", on_delete=models.CASCADE, null=True, blank=True)
+    agent_run = models.ForeignKey(AgentRun, related_name="stored_assets", on_delete=models.CASCADE, null=True, blank=True)
+    artifact = models.ForeignKey(GeneratedArtifact, related_name="stored_assets", on_delete=models.CASCADE, null=True, blank=True)
+    asset_type = models.CharField(max_length=40, choices=AssetType.choices, db_index=True)
+    object_key = models.CharField(max_length=900, db_index=True)
+    storage_backend = models.CharField(max_length=80, default="default")
+    content_type = models.CharField(max_length=120, blank=True)
+    checksum = models.CharField(max_length=64, db_index=True)
+    byte_size = models.PositiveIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["session", "asset_type"], name="asset_session_type_idx"),
+            models.Index(fields=["canonical_video", "asset_type"], name="asset_video_type_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.asset_type}: {self.object_key}"

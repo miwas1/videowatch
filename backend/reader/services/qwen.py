@@ -6,6 +6,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,43 @@ class QwenClient:
             ],
             max_tokens=max_tokens,
             fallback_models=fallback_models,
+        )
+
+    def transcribe_audio(
+        self,
+        *,
+        data: bytes,
+        filename: str,
+        content_type: str,
+        model: str | None = None,
+    ) -> QwenResult:
+        transcription_model = model or settings.QWEN_AUDIO_TRANSCRIPTION_MODEL
+        if not transcription_model:
+            raise QwenConfigurationError("QWEN_AUDIO_TRANSCRIPTION_MODEL or DASHSCOPE_AUDIO_TRANSCRIPTION_MODEL is required.")
+
+        started = time.perf_counter()
+        audio_file = BytesIO(data)
+        audio_file.name = filename
+        response = self.client.audio.transcriptions.create(
+            model=transcription_model,
+            file=(filename, audio_file, content_type or "application/octet-stream"),
+        )
+        latency_ms = round((time.perf_counter() - started) * 1000)
+        raw_payload = response.model_dump(mode="json") if hasattr(response, "model_dump") else response
+        text = ""
+        if isinstance(raw_payload, dict):
+            text = str(raw_payload.get("text") or raw_payload.get("transcript") or "").strip()
+        elif isinstance(raw_payload, str):
+            text = raw_payload.strip()
+        if not text:
+            text = str(getattr(response, "text", "") or "").strip()
+        request_id = str(getattr(response, "id", "") or "")
+        return QwenResult(
+            model=transcription_model,
+            content={"text": text, "raw": raw_payload},
+            raw_text=text,
+            latency_ms=latency_ms,
+            request_id=request_id,
         )
 
     def _json_completion(

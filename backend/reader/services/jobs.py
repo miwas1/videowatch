@@ -181,6 +181,7 @@ def run_file_ingest_job(job: ProcessingJob) -> None:
             metadata={
                 "title": payload.get("title") or session.title,
                 "webpage_url": session.source_url,
+                "file_checksum": payload.get("file_checksum", ""),
             },
             subtitle_paths=[],
             chunk_seconds=int(payload["chunk_seconds"]),
@@ -211,9 +212,12 @@ def run_file_ingest_job(job: ProcessingJob) -> None:
 def run_chunk_analysis_job(job: ProcessingJob) -> None:
     from reader.api import fail_session, mark_session_ready_when_current_chunks_ready
     from reader.services.agents import AgentSocietyRunner
+    from reader.services.audio import enrich_chunk_with_audio_transcripts
 
     chunk = VideoChunk.objects.select_related("session").get(id=UUID(str(job.payload["chunk_id"])))
     try:
+        ensure_not_canceled(chunk.session)
+        enrich_chunk_with_audio_transcripts(chunk)
         ensure_not_canceled(chunk.session)
         AgentSocietyRunner().process_chunk(chunk)
         ensure_not_canceled(chunk.session)

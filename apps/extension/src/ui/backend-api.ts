@@ -1,5 +1,6 @@
 import type {
   ArtifactResponse,
+  CapturedAudioChunk,
   CapturedFrame,
   ChunkSummary,
   CaptureDetail,
@@ -14,6 +15,7 @@ import type {
 } from "../types";
 
 const frameFileCache = new WeakMap<CapturedFrame, File>();
+const audioFileCache = new WeakMap<CapturedAudioChunk, File>();
 
 export class DescribeOpsApi {
   constructor(private readonly settings: ExtensionSettings) {}
@@ -73,6 +75,7 @@ export class DescribeOpsApi {
     transcriptText: string;
     captureNotes: string;
     frames: CapturedFrame[];
+    audioChunks?: CapturedAudioChunk[];
   }): Promise<{ chunk_id: string; status: string; message: string }> {
     const form = new FormData();
     form.set("chunk_index", String(params.chunkIndex));
@@ -82,6 +85,7 @@ export class DescribeOpsApi {
     form.set("capture_notes", params.captureNotes);
 
     appendFrameFiles(form, params.frames);
+    appendAudioFiles(form, params.audioChunks ?? []);
 
     return this.requestJson<{ chunk_id: string; status: string; message: string }>(
       `/api/v1/sessions/${params.sessionId}/chunks/async`,
@@ -214,12 +218,34 @@ function appendFrameFiles(form: FormData, frames: CapturedFrame[]): void {
   });
 }
 
+function appendAudioFiles(form: FormData, chunks: CapturedAudioChunk[]): void {
+  chunks.forEach((chunk, index) => {
+    form.append("audio_chunks", audioChunkToFile(chunk, `audio-${index + 1}.${audioExtension(chunk.mimeType)}`));
+  });
+}
+
 function frameToFile(frame: CapturedFrame, filename: string): File {
   const cached = frameFileCache.get(frame);
   if (cached) return cached;
   const file = dataUrlToFile(frame.dataUrl, filename, frame.mimeType);
   frameFileCache.set(frame, file);
   return file;
+}
+
+function audioChunkToFile(chunk: CapturedAudioChunk, filename: string): File {
+  const cached = audioFileCache.get(chunk);
+  if (cached) return cached;
+  const file = dataUrlToFile(chunk.dataUrl, filename, chunk.mimeType);
+  audioFileCache.set(chunk, file);
+  return file;
+}
+
+function audioExtension(mimeType: CapturedAudioChunk["mimeType"]): string {
+  if (mimeType.includes("ogg")) return "ogg";
+  if (mimeType.includes("mpeg")) return "mp3";
+  if (mimeType.includes("mp4")) return "m4a";
+  if (mimeType.includes("wav")) return "wav";
+  return "webm";
 }
 
 function dataUrlToFile(dataUrl: string, filename: string, mimeType: string): File {

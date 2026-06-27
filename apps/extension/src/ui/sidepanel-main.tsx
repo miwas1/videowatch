@@ -1,24 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  CheckCircledIcon,
   DownloadIcon,
   ExclamationTriangleIcon,
-  GearIcon,
-  OpenInNewWindowIcon,
-  Pencil1Icon,
+  CheckCircledIcon,
   PlayIcon,
   ReaderIcon,
-  ReloadIcon,
-  SpeakerLoudIcon,
-  StopIcon,
-  TimerIcon
+  ReloadIcon
 } from "@radix-ui/react-icons";
 import { DescribeOpsApi, composeCaptureNotes, composeTranscriptText } from "./backend-api";
-import { blocksToCues, readableKind } from "./cues";
-import { loadSettings, saveSettings } from "./storage";
+import { loadSettings } from "./storage";
 import type {
   ArtifactResponse,
+  CapturedAudioChunk,
   CapturedFrame,
   CapturedRange,
   DetectedMedia,
@@ -26,7 +20,6 @@ import type {
   HealthResponse,
   PanelStage,
   PageAccessibilitySnapshot,
-  ReadingBlock,
   ReadingDocumentResponse,
   RuntimeResponse,
   SessionResponse,
@@ -40,7 +33,6 @@ const CHUNK_READY_TIMEOUT_MS = 240000;
 
 function SidePanel() {
   const [settings, setSettings] = useState<ExtensionSettings | null>(null);
-  const [draftSettings, setDraftSettings] = useState<ExtensionSettings | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [snapshot, setSnapshot] = useState<PageAccessibilitySnapshot | null>(null);
   const [selectedMediaId, setSelectedMediaId] = useState("");
@@ -50,19 +42,13 @@ function SidePanel() {
   const [status, setStatus] = useState("Scan the active tab to find a video.");
   const [error, setError] = useState("");
   const [chunkIndex, setChunkIndex] = useState(0);
-  const [attached, setAttached] = useState(false);
-  const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
-  const [showConnectionSettings, setShowConnectionSettings] = useState(false);
-  const [urlInput, setUrlInput] = useState("");
   const [capturedRanges, setCapturedRanges] = useState<CapturedRange[]>([]);
   const [autoCapturing, setAutoCapturing] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptResponse | null>(null);
-  const [captureConfirmed, setCaptureConfirmed] = useState(false);
   const [finalArtifact, setFinalArtifact] = useState<ArtifactResponse | null>(null);
   const [progressText, setProgressText] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const autoCaptureRef = useRef(false);
-  const autoStartedRef = useRef(false);
   const chunkIndexRef = useRef(0);
   const selectedMediaIdRef = useRef("");
   const sessionRef = useRef<SessionResponse | null>(null);
@@ -74,14 +60,12 @@ function SidePanel() {
     if (!snapshot) return null;
     return snapshot.media.find((item) => item.id === selectedMediaId) ?? snapshot.media.find((item) => item.isFocused) ?? snapshot.media[0] ?? null;
   }, [selectedMediaId, snapshot]);
-  const cues = useMemo(() => blocksToCues(documentPayload?.blocks ?? [], documentPayload?.timeline ?? []), [documentPayload]);
 
   useEffect(() => {
     let alive = true;
     loadSettings().then((loaded) => {
       if (!alive) return;
       setSettings(loaded);
-      setDraftSettings(loaded);
       void checkHealth(loaded);
     });
     return () => { alive = false; };
@@ -97,7 +81,6 @@ function SidePanel() {
 
   useEffect(() => {
     selectedMediaIdRef.current = selectedMediaId;
-    setCaptureConfirmed(false);
   }, [selectedMediaId]);
 
   useEffect(() => {
@@ -107,15 +90,6 @@ function SidePanel() {
   useEffect(() => {
     snapshotRef.current = snapshot;
   }, [snapshot]);
-
-  useEffect(() => {
-    if (!settings?.autoCapture || !captureConfirmed || autoStartedRef.current || autoCapturing || isBusy(stage) || !api || !snapshot || !focusedMedia) {
-      return;
-    }
-    autoStartedRef.current = true;
-    setStatus("Auto mode enabled. Starting capture.");
-    void startAutoCapture();
-  }, [api, autoCapturing, captureConfirmed, focusedMedia, settings?.autoCapture, snapshot, stage]);
 
   // Task 4: Per-agent progress via SSE polling
   useEffect(() => {
@@ -136,10 +110,10 @@ function SidePanel() {
             if (line.startsWith("data:")) {
               const data = line.slice(5).trim();
               try {
-                const event = JSON.parse(data) as { id?: number; type?: string; message?: string };
+                const event = JSON.parse(data) as { id?: number; type?: string; message?: string; payload?: Record<string, unknown> };
                 if (event.id && event.id > lastEventId) lastEventId = event.id;
                 if (event.type) {
-                  const label = sseEventLabel(event.type, event.message);
+                  const label = sseEventLabel(event.type, event.message, event.payload);
                   setProgressText(label);
                 }
               } catch {
@@ -173,16 +147,6 @@ function SidePanel() {
     } catch {
       setHealth(null);
     }
-  }
-
-  async function persistSettings() {
-    if (!draftSettings) return;
-    const saved = await saveSettings(draftSettings);
-    setSettings(saved);
-    setDraftSettings(saved);
-    setCaptureConfirmed(false);
-    await checkHealth(saved);
-    setStatus("Capture settings saved.");
   }
 
   async function scanActiveTab() {
@@ -255,8 +219,8 @@ function SidePanel() {
       await scanActiveTab();
       return false;
     }
-    if (!settings || !captureConfirmed) {
-      setStatus("Review capture details before uploading.");
+    if (!settings) {
+      setStatus("Capture settings are still loading.");
       return false;
     }
 
@@ -271,8 +235,8 @@ function SidePanel() {
       const end = overrideEnd ?? (start + (settings?.chunkSeconds ?? 30));
       const activeChunkIndex = overrideChunkIndex ?? chunkIndexRef.current;
       const frameCount = settings?.framesPerChunk ?? 4;
-      setStatus(`Capturing ${frameCount} frames from ${formatClock(start)} to ${formatClock(end)}.`);
-      setProgressText("Seeking video and capturing frames...");
+      setStatus(`Watching ${formatClock(start)} - ${formatClock(end)}.`);
+      setProgressText(`Extracting audio and ${frameCount} frames for ${formatClock(start)} - ${formatClock(end)}.`);
 
       const frameResponse = await chrome.runtime.sendMessage({
         name: "CAPTURE_MULTI_FRAMES_REQUESTED",
@@ -290,6 +254,20 @@ function SidePanel() {
         return false;
       }
 
+      setProgressText(`Recording audio for ${formatClock(start)} - ${formatClock(end)}.`);
+      const audioChunks: CapturedAudioChunk[] = [];
+      const audioResponse = await chrome.runtime.sendMessage({
+        name: "CAPTURE_AUDIO_CHUNK_REQUESTED",
+        mediaId: activeMedia.id,
+        startSeconds: start,
+        endSeconds: end
+      }) as RuntimeResponse<CapturedAudioChunk | null>;
+      if (audioResponse.ok && audioResponse.payload) {
+        audioChunks.push(audioResponse.payload);
+      } else if (!audioResponse.ok) {
+        setProgressText(`Audio unavailable for this chunk; continuing with frames and captions.`);
+      }
+
       let transcriptSource = transcript;
       if (settings.captureDetail !== "media" && activeMedia.source && !transcriptSource) {
         transcriptSource = await ensureTranscript(activeMedia.source);
@@ -297,8 +275,8 @@ function SidePanel() {
       const transcriptSlice = settings.captureDetail !== "media" ? getTranscriptForRange(start, end, transcriptSource) : "";
 
       setStage("upload");
-      setProgressText("Uploading frames for background analysis...");
-      setStatus(`Uploading ${frameResponse.payload.length} frames. Analysis will continue in the background.`);
+      setProgressText("Uploading chunk to the backend.");
+      setStatus(`Sending ${formatClock(start)} - ${formatClock(end)} for analysis.`);
       try {
         await api.uploadChunkAsync({
           sessionId: activeSession.id,
@@ -307,17 +285,19 @@ function SidePanel() {
           endSeconds: end,
           transcriptText: transcriptSlice || composeTranscriptText(activeSnapshot, settings.captureDetail),
           captureNotes: composeCaptureNotes(activeSnapshot, activeMedia.id, frameResponse.payload[0], settings.captureDetail),
-          frames: frameResponse.payload
+          frames: frameResponse.payload,
+          audioChunks
         });
       } finally {
         releaseCapturedFrames(frameResponse.payload);
+        releaseCapturedAudio(audioChunks);
       }
 
       const newRange: CapturedRange = { start, end, chunkIndex: activeChunkIndex };
       setCapturedRanges((prev) => [...prev, newRange]);
       chunkIndexRef.current = Math.max(chunkIndexRef.current, activeChunkIndex + 1);
       setChunkIndex(chunkIndexRef.current);
-      setStatus(`Chunk ${activeChunkIndex + 1} queued. Waiting for analysis.`);
+      setStatus(`Chunk ${activeChunkIndex + 1} queued. Synthesizing chunk notes.`);
 
       await waitForChunkReady(activeSession.id, activeChunkIndex);
       const nextDocument = await api.getDocument(activeSession.id);
@@ -326,7 +306,7 @@ function SidePanel() {
       stopTimer();
       setProgressText("");
       setStage("review");
-      setStatus("Chunk analyzed. Reading document updated.");
+      setStatus(`Chunk ${activeChunkIndex + 1} analyzed.`);
       return true;
     } catch (caught) {
       stopTimer();
@@ -373,10 +353,7 @@ function SidePanel() {
   }
 
   async function startAutoCapture() {
-    if (!captureConfirmed) {
-      setStatus("Review capture details before starting auto-capture.");
-      return;
-    }
+    if (!api) return;
     setAutoCapturing(true);
     autoCaptureRef.current = true;
     try {
@@ -390,28 +367,43 @@ function SidePanel() {
       setSnapshot(response.payload);
       const media = mediaFromSnapshot(response.payload);
       if (!media || !media.duration) {
-        fail("Auto-capture needs a video duration.", "The active media did not expose a usable duration.");
+        fail("Capture needs a video duration.", "The active media did not expose a usable duration.");
         return;
       }
       selectedMediaIdRef.current = media.id;
       setSelectedMediaId(media.id);
 
+      const activeSession = await createOrReuseSession(response.payload, media);
+      if (!activeSession) return;
+      const cachedArtifact = await refreshFinalArtifact(activeSession.id);
+      if (activeSession.status === "ready" && cachedArtifact) {
+        setDocumentPayload(await api.getDocument(activeSession.id));
+        setStage("review");
+        setStatus("Stored analysis found. Final synthesis applied.");
+        setProgressText("");
+        return;
+      }
+
       const chunkSeconds = settings?.chunkSeconds ?? 30;
       const capturedEnd = capturedRanges.length ? Math.max(...capturedRanges.map((range) => range.end)) : 0;
       let nextChunkIndex = chunkIndexRef.current;
+      let completedAllChunks = true;
 
       for (let start = capturedEnd; start < media.duration && autoCaptureRef.current; start += chunkSeconds) {
         const end = Math.min(start + chunkSeconds, media.duration);
-        setStatus(`Auto mode processing chunk ${nextChunkIndex + 1}: ${formatClock(start)} to ${formatClock(end)}.`);
+        setStatus(`Watching ${formatClock(start)} - ${formatClock(end)}.`);
         const ok = await captureAndAnalyze(start, end, nextChunkIndex);
-        if (!ok || !autoCaptureRef.current) break;
+        if (!ok || !autoCaptureRef.current) {
+          completedAllChunks = false;
+          break;
+        }
         nextChunkIndex += 1;
       }
 
-      if (autoCaptureRef.current) {
+      if (autoCaptureRef.current && completedAllChunks) {
         setStatus("All chunks captured. Synthesizing final document.");
         await synthesizeSession(sessionRef.current?.id);
-        setStatus("Auto-capture complete. Full document synthesized.");
+        setStatus("Final synthesis applied.");
       }
     } finally {
       if (autoCaptureRef.current) {
@@ -438,36 +430,9 @@ function SidePanel() {
       }
       setStage("review");
       setProgressText("");
-      if (result.summary) {
-        setStatus(`Synthesis complete: ${result.summary.slice(0, 100)}...`);
-      } else {
-        setStatus("Synthesis finished.");
-      }
+      setStatus("Final synthesis applied.");
     } catch (caught) {
       fail("Synthesis failed.", String(caught));
-    }
-  }
-
-  async function synthesizeDocument() {
-    await synthesizeSession(sessionRef.current?.id ?? session?.id);
-  }
-
-  function stopAutoCapture() {
-    autoCaptureRef.current = false;
-    setAutoCapturing(false);
-    setStatus("Auto-capture stopped.");
-  }
-
-  async function refreshDocument() {
-    if (!api || !session) return;
-    setStage("review");
-    setStatus("Refreshing the reading document.");
-    try {
-      setDocumentPayload(await api.getDocument(session.id));
-      await refreshFinalArtifact(session.id);
-      setStatus("Reading document refreshed.");
-    } catch (caught) {
-      fail("Could not refresh the document.", String(caught));
     }
   }
 
@@ -487,101 +452,6 @@ function SidePanel() {
       setStatus("Document exported as Markdown.");
     } catch (caught) {
       fail("Export failed.", String(caught));
-    }
-  }
-
-  async function processVideoUrl(url: string) {
-    if (!api) return;
-    setError("");
-    setStage("upload");
-    startTimer();
-    setStatus("Downloading video and starting full analysis...");
-    setProgressText("Backend is downloading and processing the video...");
-    try {
-      const result = await api.processUrl(url);
-      const newSession = await api.getSessionStatus(result.session_id);
-      setSession(newSession);
-      setStatus(`Processing started for "${newSession.title}". Polling for updates...`);
-      pollForCompletion(result.session_id);
-    } catch (caught) {
-      stopTimer();
-      setProgressText("");
-      fail("URL processing failed.", String(caught));
-    }
-  }
-
-  async function pollForCompletion(sessionId: string) {
-    if (!api) return;
-    const poll = async () => {
-      try {
-        const status = await api.getSessionStatus(sessionId);
-        setSession(status);
-        if (status.status === "ready") {
-          stopTimer();
-          setProgressText("");
-          const doc = await api!.getDocument(sessionId);
-          setDocumentPayload(doc);
-          await refreshFinalArtifact(sessionId);
-          setStage("review");
-          setStatus(`Document ready: ${doc.blocks.length} blocks from "${status.title}".`);
-          return;
-        }
-        if (status.status === "failed") {
-          stopTimer();
-          setProgressText("");
-          fail("Video processing failed.", status.error_message);
-          return;
-        }
-        setTimeout(poll, 5000);
-      } catch {
-        setTimeout(poll, 8000);
-      }
-    };
-    setTimeout(poll, 5000);
-  }
-
-  function openInTab() {
-    chrome.tabs.create({ url: chrome.runtime.getURL("sidepanel.html") });
-  }
-
-  async function attachPlayback() {
-    if (!focusedMedia || cues.length === 0) return;
-    const response = await chrome.runtime.sendMessage({
-      name: "DESCRIPTIONS_ATTACH_REQUESTED",
-      mediaId: focusedMedia.id,
-      cues
-    }) as RuntimeResponse<{ cueCount: number }>;
-    if (!response.ok) {
-      fail("Could not attach descriptions.", response.message);
-      return;
-    }
-    setAttached(true);
-    setStatus(`${response.payload.cueCount} spoken descriptions attached to the active video.`);
-  }
-
-  async function stopPlayback() {
-    await chrome.runtime.sendMessage({ name: "DESCRIPTIONS_STOP_REQUESTED" });
-    setAttached(false);
-    setStatus("Spoken descriptions stopped.");
-  }
-
-  async function describeNow() {
-    const response = await chrome.runtime.sendMessage({ name: "DESCRIBE_NOW_REQUESTED" }) as RuntimeResponse<{ text: string }>;
-    setStatus(response.ok ? response.payload.text : response.message);
-  }
-
-  async function saveBlock(block: ReadingBlock, body: string) {
-    if (!api) return;
-    try {
-      const response = await api.correctBlock(block.id, body, "Reviewer edit from browser extension side panel.");
-      setDocumentPayload((current) => current ? {
-        ...current,
-        blocks: current.blocks.map((item) => item.id === block.id ? response.block : item)
-      } : current);
-      setEditingBlockId(null);
-      setStatus("Reviewer correction saved.");
-    } catch (caught) {
-      fail("Could not save the correction.", String(caught));
     }
   }
 
@@ -614,28 +484,7 @@ function SidePanel() {
           <p className="eyebrow">DescribeOps</p>
           <h1 id="panel-title">Video reading layer</h1>
         </div>
-        <div className="topbar-actions">
-          <HealthPill health={health} />
-          <button
-            type="button"
-            className="icon-button"
-            onClick={openInTab}
-            aria-label="Open in full tab"
-            title="Open in full tab"
-          >
-            <OpenInNewWindowIcon aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => setShowConnectionSettings((value) => !value)}
-            aria-label={showConnectionSettings ? "Hide capture settings" : "Show capture settings"}
-            aria-pressed={showConnectionSettings}
-            title={showConnectionSettings ? "Hide capture settings" : "Capture settings"}
-          >
-            <GearIcon aria-hidden="true" />
-          </button>
-        </div>
+        <HealthPill health={health} />
       </header>
 
       <section className="stage-rail" aria-label="Workflow progress">
@@ -655,31 +504,15 @@ function SidePanel() {
         </div>
       )}
 
-      <section className={showConnectionSettings ? "control-grid" : "control-grid compact"} aria-label="Capture controls">
+      <section className="control-grid compact" aria-label="Capture controls">
         <div className="primary-zone">
           <MediaSummary snapshot={snapshot} focusedMedia={focusedMedia} selectedMediaId={selectedMediaId} onSelect={setSelectedMediaId} />
-
-          {settings && (
-            <CaptureConsentPanel
-              settings={settings}
-              focusedMedia={focusedMedia}
-              confirmed={captureConfirmed}
-              onConfirm={() => {
-                setCaptureConfirmed(true);
-                setStatus("Capture approved for the current settings.");
-              }}
-            />
-          )}
 
           {capturedRanges.length > 0 && (
             <CoverageBar
               ranges={capturedRanges}
               duration={focusedMedia?.duration}
               gaps={gapWarnings}
-              onCaptureRange={(start, end) => {
-                seekVideo(start);
-                captureAndAnalyze(start, end);
-              }}
             />
           )}
 
@@ -688,104 +521,32 @@ function SidePanel() {
               <ReloadIcon aria-hidden="true" />
               Scan
             </button>
-            <button type="button" className="button primary" onClick={() => captureAndAnalyze()} disabled={!api || !focusedMedia || !captureConfirmed || isBusy(stage) || autoCapturing}>
+            <button type="button" className="button primary" onClick={startAutoCapture} disabled={!api || !focusedMedia || isBusy(stage) || autoCapturing}>
               <PlayIcon aria-hidden="true" />
               Capture
             </button>
-            {autoCapturing ? (
-              <button type="button" className="button danger" onClick={stopAutoCapture}>
-                <StopIcon aria-hidden="true" />
-                Stop auto
-              </button>
-            ) : (
-              <button type="button" className="button accent" onClick={startAutoCapture} disabled={!api || !focusedMedia || !captureConfirmed || isBusy(stage)}>
-                <TimerIcon aria-hidden="true" />
-                Auto
-              </button>
-            )}
-          </div>
-        </div>
-
-        {showConnectionSettings ? (
-          <ConnectionPanel
-            settings={draftSettings}
-            onChange={setDraftSettings}
-            onSave={persistSettings}
-            disabled={!draftSettings}
-          />
-        ) : null}
-      </section>
-
-      {!session && (
-        <section className="url-ingest-panel" aria-label="Process video by URL">
-          <div className="section-heading">
-            <h2>Or process by URL</h2>
-          </div>
-          <div className="url-input-row">
-            <input
-              type="url"
-              placeholder="https://www.youtube.com/watch?v=..."
-              value={urlInput}
-              onChange={(e) => setUrlInput(e.currentTarget.value)}
-              disabled={isBusy(stage)}
-            />
-            <button
-              type="button"
-              className="button primary"
-              onClick={() => processVideoUrl(urlInput)}
-              disabled={!api || !urlInput.trim() || isBusy(stage)}
-            >
-              <PlayIcon aria-hidden="true" />
-              Process
+            <button type="button" className="button primary" onClick={exportDocument} disabled={!session || isBusy(stage)}>
+              <DownloadIcon aria-hidden="true" />
+              Export
             </button>
           </div>
-          <p className="url-hint">Downloads the video, extracts frames, fetches transcript, and runs the full AI pipeline automatically.</p>
-        </section>
-      )}
+        </div>
+      </section>
 
       {isBusy(stage) ? <SkeletonReview /> : null}
 
-      <section className="review-toolbar" aria-label="Playback and export controls">
-        <div>
-          <p className="label">Generated cues</p>
-          <strong>{cues.length}</strong>
-        </div>
-        <button type="button" className="button primary" onClick={attached ? stopPlayback : attachPlayback} disabled={!cues.length || !focusedMedia}>
-          {attached ? <StopIcon aria-hidden="true" /> : <SpeakerLoudIcon aria-hidden="true" />}
-          {attached ? "Stop" : "Attach"}
-        </button>
-        <button type="button" className="button subtle" onClick={describeNow} disabled={!attached}>
-          <ReaderIcon aria-hidden="true" />
-          Now
-        </button>
-        <button type="button" className="button subtle" onClick={refreshDocument} disabled={!session || isBusy(stage)}>
-          <ReloadIcon aria-hidden="true" />
-          Refresh
-        </button>
-      </section>
-
-      {documentPayload && (
-        <section className="export-toolbar" aria-label="Document actions">
-          <button type="button" className="button subtle" onClick={synthesizeDocument} disabled={!session || isBusy(stage)}>
-            <ReaderIcon aria-hidden="true" />
-            Synthesize
-          </button>
-          <button type="button" className="button primary" onClick={exportDocument} disabled={!session}>
-            <DownloadIcon aria-hidden="true" />
-            Export .md
-          </button>
-        </section>
-      )}
+      <ActivityPanel
+        stage={stage}
+        status={status}
+        error={error}
+        progressText={progressText}
+        elapsedSeconds={elapsedSeconds}
+        capturedRanges={capturedRanges}
+        documentPayload={documentPayload}
+        finalArtifact={finalArtifact}
+      />
 
       <FinalArtifactReview artifact={finalArtifact} />
-
-      <DocumentReview
-        documentPayload={documentPayload}
-        editingBlockId={editingBlockId}
-        onEdit={setEditingBlockId}
-        onSave={saveBlock}
-        onSeek={seekVideo}
-      />
 
       <TranscriptSection transcript={transcript} onSeek={seekVideo} />
     </main>
@@ -804,54 +565,14 @@ function HealthPill({ health }: { health: HealthResponse | null }) {
   );
 }
 
-function CaptureConsentPanel({
-  settings,
-  focusedMedia,
-  confirmed,
-  onConfirm
-}: {
-  settings: ExtensionSettings;
-  focusedMedia: DetectedMedia | null;
-  confirmed: boolean;
-  onConfirm: () => void;
-}) {
-  const captionsIncluded = settings.captureDetail !== "media";
-  const pageContextIncluded = settings.captureDetail === "context";
-  return (
-    <section className={confirmed ? "consent-panel consent-panel--confirmed" : "consent-panel"} aria-label="Capture data review">
-      <div className="section-heading">
-        <div>
-          <p className="label">Before upload</p>
-          <h2>{confirmed ? "Capture approved" : "Review capture details"}</h2>
-        </div>
-        {confirmed ? <CheckCircledIcon aria-hidden="true" /> : <ExclamationTriangleIcon aria-hidden="true" />}
-      </div>
-      <dl className="consent-grid">
-        <div><dt>Frames</dt><dd>{settings.framesPerChunk} per chunk</dd></div>
-        <div><dt>Captions</dt><dd>{captionsIncluded ? "Included" : "Off"}</dd></div>
-        <div><dt>Page text</dt><dd>{pageContextIncluded ? "Included" : "Off"}</dd></div>
-        <div><dt>Fallback</dt><dd>{settings.screenshotFallback === "cropped" ? "Cropped video area" : "Off"}</dd></div>
-        <div><dt>Destination</dt><dd title={settings.apiBaseUrl}>{settings.apiBaseUrl.replace(/^https?:\/\//, "")}</dd></div>
-        <div><dt>Media</dt><dd>{focusedMedia ? focusedMedia.label : "None selected"}</dd></div>
-      </dl>
-      <button type="button" className={confirmed ? "button subtle" : "button primary"} onClick={onConfirm} disabled={!focusedMedia}>
-        <CheckCircledIcon aria-hidden="true" />
-        {confirmed ? "Approved" : "Allow capture"}
-      </button>
-    </section>
-  );
-}
-
 function CoverageBar({
   ranges,
   duration,
-  gaps,
-  onCaptureRange
+  gaps
 }: {
   ranges: CapturedRange[];
   duration: number | undefined;
   gaps: { start: number; end: number }[];
-  onCaptureRange?: (start: number, end: number) => void;
 }) {
   const totalDuration = duration || Math.max(...ranges.map((r) => r.end), 60);
   return (
@@ -868,17 +589,14 @@ function CoverageBar({
           />
         ))}
         {gaps.map((gap, index) => (
-          <button
+          <div
             key={`gap-${index}`}
-            type="button"
             className="coverage-gap"
             style={{
               left: `${(gap.start / totalDuration) * 100}%`,
               width: `${((gap.end - gap.start) / totalDuration) * 100}%`
             }}
-            title={`Gap: ${formatClock(gap.start)} to ${formatClock(gap.end)} — click to capture`}
-            aria-label={`Capture gap from ${formatClock(gap.start)} to ${formatClock(gap.end)}`}
-            onClick={() => onCaptureRange?.(gap.start, gap.end)}
+            title={`Gap: ${formatClock(gap.start)} to ${formatClock(gap.end)}`}
           />
         ))}
       </div>
@@ -943,7 +661,6 @@ function MediaSummary({
       )}
 
       <div className="metric-grid">
-        <Metric label="Time" value={formatClock(focusedMedia.currentTime ?? 0)} />
         <Metric label="Length" value={focusedMedia.duration ? formatClock(focusedMedia.duration) : "Unknown"} />
         <Metric label="Captions" value={focusedMedia.hasCaptions || snapshot.liveCaptionText.length ? "Seen" : "None"} />
       </div>
@@ -951,85 +668,53 @@ function MediaSummary({
   );
 }
 
-function ConnectionPanel({
-  settings,
-  onChange,
-  onSave,
-  disabled
+function ActivityPanel({
+  stage,
+  status,
+  error,
+  progressText,
+  elapsedSeconds,
+  capturedRanges,
+  documentPayload,
+  finalArtifact
 }: {
-  settings: ExtensionSettings | null;
-  onChange: (settings: ExtensionSettings) => void;
-  onSave: () => void;
-  disabled: boolean;
+  stage: PanelStage;
+  status: string;
+  error: string;
+  progressText: string;
+  elapsedSeconds: number;
+  capturedRanges: CapturedRange[];
+  documentPayload: ReadingDocumentResponse | null;
+  finalArtifact: ArtifactResponse | null;
 }) {
+  const lines = buildActivityLines({
+    stage,
+    status,
+    error,
+    progressText,
+    elapsedSeconds,
+    capturedRanges,
+    documentPayload,
+    finalArtifact
+  });
+
   return (
-    <section className="connection-panel" aria-label="Capture settings">
+    <section className="activity-console" aria-labelledby="activity-console-title" aria-live="polite">
       <div className="section-heading">
-        <h2>Capture</h2>
-        <GearIcon aria-hidden="true" />
+        <div>
+          <p className="label">Status</p>
+          <h2 id="activity-console-title">Capture console</h2>
+        </div>
+        <span className="badge">{stage === "error" ? "attention" : isBusy(stage) ? "running" : "ready"}</span>
       </div>
-      <label className="field">
-        <span>API token</span>
-        <input
-          type="password"
-          value={settings?.apiToken ?? ""}
-          placeholder="X-DescribeOps-Token"
-          onChange={(event) => settings && onChange({ ...settings, apiToken: event.currentTarget.value })}
-        />
-      </label>
-      <label className="field">
-        <span>Capture detail</span>
-        <select
-          value={settings?.captureDetail ?? "media"}
-          onChange={(event) => settings && onChange({ ...settings, captureDetail: event.currentTarget.value as ExtensionSettings["captureDetail"] })}
-        >
-          <option value="media">Media only</option>
-          <option value="captions">Media + captions</option>
-          <option value="context">Media + page context</option>
-        </select>
-      </label>
-      <label className="field">
-        <span>Screenshot fallback</span>
-        <select
-          value={settings?.screenshotFallback ?? "cropped"}
-          onChange={(event) => settings && onChange({ ...settings, screenshotFallback: event.currentTarget.value as ExtensionSettings["screenshotFallback"] })}
-        >
-          <option value="cropped">Cropped video area</option>
-          <option value="off">Off</option>
-        </select>
-      </label>
-      <label className="field">
-        <span>Chunk seconds</span>
-        <input
-          type="number"
-          min={8}
-          max={120}
-          value={settings?.chunkSeconds ?? 30}
-          onChange={(event) => settings && onChange({ ...settings, chunkSeconds: Number(event.currentTarget.value) })}
-        />
-      </label>
-      <label className="field">
-        <span>Frames per chunk</span>
-        <input
-          type="number"
-          min={1}
-          max={8}
-          value={settings?.framesPerChunk ?? 4}
-          onChange={(event) => settings && onChange({ ...settings, framesPerChunk: Number(event.currentTarget.value) })}
-        />
-      </label>
-      <label className="field checkbox-field">
-        <input
-          type="checkbox"
-          checked={Boolean(settings?.autoCapture)}
-          onChange={(event) => settings && onChange({ ...settings, autoCapture: event.currentTarget.checked })}
-        />
-        <span>Auto-capture after approval</span>
-      </label>
-      <button type="button" className="button subtle" onClick={onSave} disabled={disabled}>
-        <CheckCircledIcon aria-hidden="true" />
-        Save
-      </button>
+      <ol>
+        {lines.map((line, index) => (
+          <li key={`${line}-${index}`}>
+            <span>{">"}</span>
+            <code>{line}</code>
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }
@@ -1064,198 +749,6 @@ function FinalArtifactReview({ artifact }: { artifact: ArtifactResponse | null }
       )}
     </section>
   );
-}
-
-function DocumentReview({
-  documentPayload,
-  editingBlockId,
-  onEdit,
-  onSave,
-  onSeek
-}: {
-  documentPayload: ReadingDocumentResponse | null;
-  editingBlockId: string | null;
-  onEdit: (id: string | null) => void;
-  onSave: (block: ReadingBlock, body: string) => void;
-  onSeek: (seconds: number) => void;
-}) {
-  if (!documentPayload) {
-    return (
-      <section className="empty-state document-empty" aria-label="No document generated">
-        <ReaderIcon aria-hidden="true" />
-        <h2>No reading document yet</h2>
-        <p>Capture a chunk to generate context-preserving blocks, timeline moments, and spoken cues.</p>
-      </section>
-    );
-  }
-
-  return (
-    <section className="document-review" aria-labelledby="document-title">
-      <div className="section-heading">
-        <h2 id="document-title">Reading document</h2>
-        <span className="badge">{documentPayload.session.status}</span>
-      </div>
-      <Timeline moments={documentPayload.timeline} />
-      <div className="block-list">
-        {documentPayload.blocks.map((block) => (
-          <ReviewBlock
-            key={block.id}
-            block={block}
-            editing={editingBlockId === block.id}
-            onEdit={() => onEdit(block.id)}
-            onCancel={() => onEdit(null)}
-            onSave={(body) => onSave(block, body)}
-            onSeek={onSeek}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ReviewBlock({
-  block,
-  editing,
-  onEdit,
-  onCancel,
-  onSave,
-  onSeek
-}: {
-  block: ReadingBlock;
-  editing: boolean;
-  onEdit: () => void;
-  onCancel: () => void;
-  onSave: (body: string) => void;
-  onSeek: (seconds: number) => void;
-}) {
-  const [draft, setDraft] = useState(block.body);
-
-  useEffect(() => {
-    setDraft(block.body);
-  }, [block.body]);
-
-  return (
-    <article className="review-block">
-      <header>
-        <div>
-          <p className="label">
-            {readableKind(block.kind)} at{" "}
-            <button
-              type="button"
-              className="block-timestamp"
-              onClick={() => onSeek(block.start_seconds)}
-              aria-label={`Seek to ${formatClock(block.start_seconds)}`}
-            >
-              {formatClock(block.start_seconds)}
-            </button>
-          </p>
-          <h3>{block.heading || "Untitled block"}</h3>
-        </div>
-        <span className="confidence">{Math.round(block.confidence * 100)}%</span>
-      </header>
-      {editing ? (
-        <div className="edit-box">
-          <label className="field">
-            <span>Block text</span>
-            <textarea value={draft} onChange={(event) => setDraft(event.currentTarget.value)} rows={7} />
-          </label>
-          <div className="action-row">
-            <button type="button" className="button primary" onClick={() => onSave(draft)}>
-              <CheckCircledIcon aria-hidden="true" />
-              Save
-            </button>
-            <button type="button" className="button subtle" onClick={onCancel}>
-              <StopIcon aria-hidden="true" />
-              Cancel
-            </button>
-          </div>
-        </div>
-      ) : (
-        <>
-          <RenderedBody body={block.body} isCode={block.kind === "code"} />
-          <div className="block-footer">
-            {block.is_user_edited ? <span className="edited">Reviewer edited</span> : <span>Source evidence {block.source_evidence.length}</span>}
-            <button type="button" className="icon-button" onClick={onEdit} aria-label={`Edit ${block.heading || "reading block"}`}>
-              <Pencil1Icon aria-hidden="true" />
-            </button>
-          </div>
-        </>
-      )}
-    </article>
-  );
-}
-
-function RenderedBody({ body, isCode }: { body: string; isCode: boolean }) {
-  if (isCode) {
-    return <pre className="block-body code-block"><code>{body}</code></pre>;
-  }
-
-  const rendered = renderMarkdown(body);
-  return <div className="block-body" dangerouslySetInnerHTML={{ __html: rendered }} />;
-}
-
-function renderMarkdown(text: string): string {
-  // Handle fenced code blocks (```...```)
-  let result = text.replace(/```[\s\S]*?```/g, (match) => {
-    const code = match.slice(3, -3).replace(/^\w*\n/, "");
-    return `<pre class="code-block"><code>${escapeHtml(code)}</code></pre>`;
-  });
-
-  // Split into lines for line-level processing
-  const lines = result.split("\n");
-  const output: string[] = [];
-  let inList = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    // Check if it's already a pre block (from fenced code above)
-    if (trimmed.startsWith("<pre")) {
-      if (inList) { output.push("</ul>"); inList = false; }
-      output.push(line);
-      continue;
-    }
-    if (trimmed.startsWith("</pre>") || trimmed.startsWith("<code>") || trimmed.startsWith("</code>")) {
-      output.push(line);
-      continue;
-    }
-
-    // Bullet list items
-    if (/^[-*]\s+/.test(trimmed)) {
-      if (!inList) { output.push("<ul>"); inList = true; }
-      const content = inlineFormat(trimmed.replace(/^[-*]\s+/, ""));
-      output.push(`<li>${content}</li>`);
-      continue;
-    }
-
-    // End list if not a list item
-    if (inList) { output.push("</ul>"); inList = false; }
-
-    if (trimmed === "") {
-      output.push("<br>");
-    } else {
-      output.push(inlineFormat(trimmed));
-    }
-  }
-
-  if (inList) output.push("</ul>");
-  return output.join("\n");
-}
-
-function inlineFormat(text: string): string {
-  // Bold: **text**
-  let result = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  // Inline code: `text`
-  result = result.replace(/`([^`]+)`/g, "<code>$1</code>");
-  return result;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 
 function TranscriptSection({
@@ -1301,8 +794,10 @@ function TranscriptSection({
   );
 }
 
-function sseEventLabel(type: string, message?: string): string {
+function sseEventLabel(type: string, message?: string, payload?: Record<string, unknown>): string {
   if (message) return message;
+  const chunkIndex = typeof payload?.chunk_index === "number" ? Number(payload.chunk_index) + 1 : null;
+  const workflow = typeof payload?.workflow_template === "string" ? payload.workflow_template.replace(/_/g, " ") : "";
   const labels: Record<string, string> = {
     "chunk.accepted": "Chunk accepted by agents...",
     "chunk.analyzing": "Agents are analyzing...",
@@ -1313,21 +808,22 @@ function sseEventLabel(type: string, message?: string): string {
     "agent.text": "Text agent processing...",
     "agent.final": "Final agent processing..."
   };
+  if (type === "job.queued") return "Queued backend analysis job.";
+  if (type === "job.started") return "Backend analysis job started.";
+  if (type === "job.succeeded") return "Backend analysis job finished.";
+  if (type === "chunk.accepted" && chunkIndex) return `Chunk ${chunkIndex} accepted.`;
+  if (type === "audio.extracting" && chunkIndex) return `Extracting audio for chunk ${chunkIndex}.`;
+  if (type === "audio.transcribing" && chunkIndex) return `Transcribing audio for chunk ${chunkIndex}.`;
+  if (type === "audio.transcribed" && chunkIndex) return `Audio transcript ready for chunk ${chunkIndex}.`;
+  if (type === "audio.skipped" && chunkIndex) return `Audio transcription skipped for chunk ${chunkIndex}.`;
+  if (type === "audio.failed" && chunkIndex) return `Audio transcription failed for chunk ${chunkIndex}; continuing.`;
+  if (type === "chunk.analyzing" && chunkIndex) return `Analyzing chunk ${chunkIndex}.`;
+  if (type === "document.updated" && chunkIndex) return `Reading document updated from chunk ${chunkIndex}.`;
+  if (type === "session.synthesizing") return workflow ? `Synthesizing ${workflow}.` : "Synthesizing final document.";
+  if (type === "session.synthesized") return workflow ? `${workflow} synthesis complete.` : "Final synthesis complete.";
+  if (type === "artifact.ready") return workflow ? `${workflow} artifact ready.` : "Artifact ready.";
+  if (type === "session.ready") return "Session ready.";
   return labels[type] || `Processing: ${type}...`;
-}
-
-function Timeline({ moments }: { moments: ReadingDocumentResponse["timeline"] }) {
-  if (!moments.length) return null;
-  return (
-    <ol className="timeline">
-      {moments.slice(0, 10).map((moment) => (
-        <li key={moment.id}>
-          <time>{formatClock(moment.timestamp_seconds)}</time>
-          <span>{moment.label}</span>
-        </li>
-      ))}
-    </ol>
-  );
 }
 
 function SkeletonReview() {
@@ -1347,6 +843,63 @@ function Metric({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
     </div>
   );
+}
+
+function buildActivityLines({
+  stage,
+  status,
+  error,
+  progressText,
+  elapsedSeconds,
+  capturedRanges,
+  documentPayload,
+  finalArtifact
+}: {
+  stage: PanelStage;
+  status: string;
+  error: string;
+  progressText: string;
+  elapsedSeconds: number;
+  capturedRanges: CapturedRange[];
+  documentPayload: ReadingDocumentResponse | null;
+  finalArtifact: ArtifactResponse | null;
+}): string[] {
+  const lines: string[] = [];
+  if (stage === "idle") {
+    lines.push("ready");
+  } else if (stage === "scan") {
+    lines.push("scanning active tab");
+  } else if (stage === "session") {
+    lines.push("opening backend session");
+  } else if (stage === "capture") {
+    lines.push("extracting audio");
+  } else if (stage === "upload") {
+    lines.push("synthesizing");
+  } else if (stage === "review") {
+    lines.push("reviewing generated output");
+  } else if (stage === "error") {
+    lines.push("attention required");
+  }
+
+  if (status) lines.push(status.toLowerCase());
+  if (progressText) lines.push(progressText.toLowerCase());
+  if (isBusy(stage)) lines.push(`elapsed ${formatClock(elapsedSeconds)}`);
+
+  for (const range of capturedRanges.slice(-5)) {
+    lines.push(`watched ${formatClock(range.start)} - ${formatClock(range.end)}; chunk ${range.chunkIndex + 1} sent`);
+  }
+
+  if (documentPayload) {
+    lines.push(`reading document updated; ${documentPayload.blocks.length} blocks available`);
+  }
+  if (finalArtifact) {
+    lines.push("final synthesis applied and displayed");
+  }
+  if (error) {
+    lines.push(error.toLowerCase());
+  }
+
+  return [...new Set(lines)].slice(-9);
 }
 
 function stageState(current: PanelStage, item: PanelStage): "done" | "active" | "waiting" | "failed" {
@@ -1383,6 +936,12 @@ function selectPrimaryArtifact(artifacts: ArtifactResponse[]): ArtifactResponse 
 function releaseCapturedFrames(frames: CapturedFrame[]): void {
   for (const frame of frames) {
     frame.dataUrl = "";
+  }
+}
+
+function releaseCapturedAudio(chunks: CapturedAudioChunk[]): void {
+  for (const chunk of chunks) {
+    chunk.dataUrl = "";
   }
 }
 

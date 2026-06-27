@@ -1,5 +1,5 @@
 import { findMediaElement, scanDocument } from "./detector";
-import type { CapturedFrame, ReviewCue } from "../types";
+import type { CapturedAudioChunk, CapturedFrame, ReviewCue } from "../types";
 
 type CaptureDetail = "media" | "captions" | "context";
 type ScreenshotFallback = "cropped" | "off";
@@ -45,6 +45,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     )
       .then((payload) => sendResponse({ ok: true, payload }))
       .catch((error) => sendResponse({ ok: false, message: "Multi-frame capture failed.", diagnostics: String(error) }));
+    return true;
+  }
+
+  if (message?.name === "CAPTURE_AUDIO_CHUNK_REQUESTED") {
+    captureAudioChunk(
+      String(message.mediaId ?? ""),
+      Number(message.startSeconds ?? 0),
+      Number(message.endSeconds ?? 30)
+    )
+      .then((payload) => sendResponse({ ok: true, payload }))
+      .catch((error) => sendResponse({ ok: false, message: "Audio capture failed.", diagnostics: String(error) }));
     return true;
   }
 
@@ -148,7 +159,75 @@ async function captureMultiFrames(
   return frames.length > 0 ? frames : [fallbackFrame(mediaId, startSeconds, "All frame captures failed.", captureDetail)];
 }
 
-function seekTo(media: HTMLVideoElement, time: number): Promise<void> {
+async function captureAudioChunk(
+  mediaId: string,
+  startSeconds: number,
+  endSeconds: number
+): Promise<CapturedAudioChunk | null> {
+  const media = findMediaElement(mediaId);
+  if (!(media instanceof HTMLVideoElement || media instanceof HTMLAudioElement)) {
+    return null;
+  }
+  const captureStream = (media as HTMLMediaElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream }).captureStream
+    ?? (media as HTMLMediaElement & { mozCaptureStream?: () => MediaStream }).mozCaptureStream;
+  if (!captureStream || typeof MediaRecorder === "undefined") {
+    return null;
+  }
+
+  const stream = captureStream.call(media);
+  const audioTracks = stream.getAudioTracks();
+  if (!audioTracks.length) {
+    stream.getTracks().forEach((track) => track.stop());
+    return null;
+  }
+  const audioOnlyStream = new MediaStream(audioTracks);
+  const mimeType = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "";
+  const recorder = new MediaRecorder(audioOnlyStream, mimeType ? { mimeType } : undefined);
+  const chunks: BlobPart[] = [];
+  const originalTime = media.currentTime;
+  const wasPaused = media.paused;
+  const originalPlaybackRate = media.playbackRate;
+
+  recorder.addEventListener("dataavailable", (event) => {
+    if (event.data.size > 0) chunks.push(event.data);
+  });
+
+  await seekTo(media as HTMLVideoElement, startSeconds);
+  media.playbackRate = 1;
+  recorder.start(1000);
+  await media.play().catch(() => undefined);
+
+  await waitForAudioRange(media, endSeconds, Math.max(1000, (endSeconds - startSeconds) * 1300 + 5000));
+
+  await new Promise<void>((resolve) => {
+    recorder.addEventListener("stop", () => resolve(), { once: true });
+    if (recorder.state !== "inactive") recorder.stop();
+    else resolve();
+  });
+  stream.getTracks().forEach((track) => track.stop());
+
+  await seekTo(media as HTMLVideoElement, originalTime);
+  media.playbackRate = originalPlaybackRate;
+  if (wasPaused) {
+    media.pause();
+  } else {
+    media.play().catch(() => undefined);
+  }
+
+  if (!chunks.length) return null;
+  const blob = new Blob(chunks, { type: "audio/webm" });
+  return {
+    mediaId,
+    startSeconds,
+    endSeconds,
+    dataUrl: await blobToDataUrl(blob),
+    mimeType: "audio/webm",
+    byteSize: blob.size,
+    note: `Audio captured from ${formatClock(startSeconds)} to ${formatClock(endSeconds)}.`
+  };
+}
+
+function seekTo(media: HTMLVideoElement | HTMLAudioElement, time: number): Promise<void> {
   return new Promise((resolve) => {
     if (Math.abs(media.currentTime - time) < 0.1) {
       resolve();
@@ -164,6 +243,36 @@ function seekTo(media: HTMLVideoElement, time: number): Promise<void> {
       media.removeEventListener("seeked", handler);
       resolve();
     }, 2000);
+  });
+}
+
+function waitForAudioRange(media: HTMLMediaElement, endSeconds: number, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      media.removeEventListener("timeupdate", onTimeUpdate);
+      media.removeEventListener("ended", finish);
+      clearTimeout(timer);
+      resolve();
+    };
+    const onTimeUpdate = () => {
+      if (media.currentTime >= endSeconds || media.ended) finish();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    media.addEventListener("timeupdate", onTimeUpdate);
+    media.addEventListener("ended", finish, { once: true });
+    onTimeUpdate();
+  });
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Could not read captured audio."));
+    reader.readAsDataURL(blob);
   });
 }
 

@@ -8,9 +8,10 @@ from typing import Any
 from django.conf import settings
 from django.db import transaction
 
-from reader.models import AgentRun, ReadingBlock, TimelineMoment, VideoChunk, VideoSession
+from reader.models import AgentRun, ReadingBlock, StoredAsset, TimelineMoment, VideoChunk, VideoSession
 from reader.services.events import emit_event
 from reader.services.qwen import QwenClient, QwenResult, stable_hash
+from reader.services.storage import save_json_asset
 from reader.services.timecode import format_timestamp
 
 PROMPT_VERSION = "video-reading-document-v1"
@@ -231,7 +232,7 @@ class AgentSocietyRunner:
             confidence_value = max(0.0, min(1.0, float(confidence)))
         except (TypeError, ValueError):
             confidence_value = 0.0
-        return AgentRun.objects.create(
+        run = AgentRun.objects.create(
             chunk=chunk,
             role=spec.role,
             model=result.model,
@@ -242,6 +243,23 @@ class AgentSocietyRunner:
             latency_ms=result.latency_ms,
             request_id=result.request_id,
         )
+        save_json_asset(
+            session=chunk.session,
+            chunk=chunk,
+            agent_run=run,
+            asset_type=StoredAsset.AssetType.QWEN_OUTPUT,
+            object_key=f"qwen/{chunk.session_id}/{chunk.chunk_index:05d}/{spec.role}-{run.id}.json",
+            payload={
+                "role": spec.role,
+                "model": result.model,
+                "prompt_version": PROMPT_VERSION,
+                "request_id": result.request_id,
+                "input_hash": run.input_hash,
+                "output": result.content,
+            },
+            metadata={"role": spec.role, "model": result.model, "chunk_index": chunk.chunk_index},
+        )
+        return run
 
     def _create_blocks(self, chunk: VideoChunk, raw_blocks: list[Any]) -> list[ReadingBlock]:
         valid_kinds = {choice[0] for choice in ReadingBlock.Kind.choices}
@@ -321,10 +339,11 @@ class AgentSocietyRunner:
                 "order": block.order,
                 "kind": block.kind,
                 "heading": block.heading,
-                "body": block.body[:600],
+                "body": block.body[:2200],
                 "start_seconds": block.start_seconds,
                 "end_seconds": block.end_seconds,
                 "confidence": block.confidence,
+                "source_evidence": block.source_evidence,
             }
             for block in blocks
         ]
@@ -335,23 +354,33 @@ class AgentSocietyRunner:
 
         workflow_instruction = SYNTHESIS_PROFILES.get(workflow_template, SYNTHESIS_PROFILES["reading_document"])
         ready_count = session.chunks.filter(status=VideoChunk.Status.READY).count()
+        evidence_manifest = self._build_evidence_manifest(session, workflow_template, blocks_json, timeline_json)
+        save_json_asset(
+            session=session,
+            asset_type=StoredAsset.AssetType.EVIDENCE_MANIFEST,
+            object_key=f"manifests/{session.id}/{workflow_template}-evidence.json",
+            payload=evidence_manifest,
+            metadata={"workflow_template": workflow_template},
+        )
+
         user_prompt = (
             f"Video title: {session.title or session.page_title or 'Untitled'}\n"
             f"Duration: {session.duration_seconds or 'unknown'}s\n"
             f"Total chunks processed: {ready_count}\n\n"
             f"Requested workflow: {workflow_template}\n"
             f"Workflow requirements: {workflow_instruction}\n\n"
-            f"Per-chunk blocks (in order):\n{blocks_json}\n\n"
-            f"Timeline moments:\n{timeline_json}"
+            f"Evidence manifest:\n{evidence_manifest}"
         )
 
         system_prompt = (
             "You are a document synthesis agent. Given per-chunk reading blocks from a video, "
             "produce a single unified workflow-specific artifact. Deduplicate overlapping content, maintain chronological order, "
-            "create useful section headings, and ensure continuity. Preserve all code, examples, "
-            "diagrams, and teaching flow. Do not summarize away details.\n\n"
+            "create useful section headings, and ensure continuity. Preserve all code, examples, screenshots, "
+            "diagrams, audio/transcript-derived details, and teaching flow. Do not summarize away details.\n"
+            "When code, screenshots, or specific visual evidence matter, include the relevant code exactly and include object_key "
+            "or frame references in the section evidence_refs. Always preserve useful video time references.\n\n"
             "Return JSON with keys: title, sections, summary.\n"
-            "sections is a list of objects with: heading, body, start_seconds, end_seconds, kind. "
+            "sections is a list of objects with: heading, body, start_seconds, end_seconds, kind, evidence_refs. "
             "Use section kinds that fit the requested workflow, such as finding, cue, step, code, decision, claim, terminology, or explanation.\n"
             "summary is a 2-3 sentence overview of the entire video."
         )
@@ -367,6 +396,97 @@ class AgentSocietyRunner:
 
         emit_event(session, "session.synthesized", {"latency_ms": result.latency_ms, "workflow_template": workflow_template})
         return result.content
+
+    def _build_evidence_manifest(
+        self,
+        session: VideoSession,
+        workflow_template: str,
+        blocks_json: list[dict[str, Any]],
+        timeline_json: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        chunks = list(
+            session.chunks.prefetch_related("frames", "stored_assets", "agent_runs").order_by("chunk_index")
+        )
+        chunk_payloads: list[dict[str, Any]] = []
+        for chunk in chunks:
+            stored_assets = list(chunk.stored_assets.all())
+            frame_assets = [
+                {
+                    "frame_id": str(frame.id),
+                    "object_key": frame.file.name,
+                    "checksum": frame.checksum,
+                    "width": frame.width,
+                    "height": frame.height,
+                    "byte_size": frame.byte_size,
+                }
+                for frame in chunk.frames.all()
+            ]
+            audio_assets = [
+                {
+                    "asset_id": str(asset.id),
+                    "object_key": asset.object_key,
+                    "checksum": asset.checksum,
+                    "content_type": asset.content_type,
+                    "byte_size": asset.byte_size,
+                }
+                for asset in stored_assets
+                if asset.asset_type == StoredAsset.AssetType.AUDIO_CHUNK
+            ]
+            transcript_assets = [
+                {
+                    "asset_id": str(asset.id),
+                    "object_key": asset.object_key,
+                    "checksum": asset.checksum,
+                    "content_type": asset.content_type,
+                    "byte_size": asset.byte_size,
+                    "metadata": asset.metadata,
+                }
+                for asset in stored_assets
+                if asset.asset_type == StoredAsset.AssetType.TRANSCRIPT
+            ]
+            qwen_outputs = [
+                {
+                    "role": run.role,
+                    "model": run.model,
+                    "request_id": run.request_id,
+                    "confidence": run.confidence,
+                    "output": run.output,
+                    "asset_keys": [
+                        asset.object_key
+                        for asset in stored_assets
+                        if asset.asset_type == StoredAsset.AssetType.QWEN_OUTPUT and asset.agent_run_id == run.id
+                    ],
+                }
+                for run in chunk.agent_runs.all()
+            ]
+            chunk_payloads.append(
+                {
+                    "chunk_index": chunk.chunk_index,
+                    "start_seconds": chunk.start_seconds,
+                    "end_seconds": chunk.end_seconds,
+                    "transcript_text": chunk.transcript_text,
+                    "capture_notes": chunk.capture_notes,
+                    "frames": frame_assets,
+                    "audio_chunks": audio_assets,
+                    "transcript_assets": transcript_assets,
+                    "qwen_outputs": qwen_outputs,
+                }
+            )
+
+        return {
+            "workflow_template": workflow_template,
+            "session": {
+                "id": str(session.id),
+                "title": session.title or session.page_title,
+                "source_url": session.source_url,
+                "duration_seconds": session.duration_seconds,
+                "source_fingerprint": session.source_fingerprint,
+                "canonical_video_id": str(session.canonical_video_id) if session.canonical_video_id else "",
+            },
+            "blocks": blocks_json,
+            "timeline": timeline_json,
+            "chunks": chunk_payloads,
+        }
 
     def _fallback_blocks_from_outputs(self, chunk: VideoChunk, prior_outputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in reversed(prior_outputs):

@@ -44,6 +44,16 @@ export type CapturedFrame = {
   note: string;
 };
 
+export type CapturedAudioChunk = {
+  mediaId: string;
+  startSeconds: number;
+  endSeconds: number;
+  dataUrl: string;
+  mimeType: "audio/webm" | "video/webm" | "audio/ogg" | "audio/mpeg" | "audio/mp4" | "audio/wav";
+  byteSize: number;
+  note: string;
+};
+
 export type CaptureDetail = "media" | "captions" | "context";
 export type ScreenshotFallback = "cropped" | "off";
 

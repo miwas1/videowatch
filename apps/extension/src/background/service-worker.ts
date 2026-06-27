@@ -22,6 +22,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     message?.name === "PAGE_SCAN_REQUESTED" ||
     message?.name === "CAPTURE_FRAME_REQUESTED" ||
     message?.name === "CAPTURE_MULTI_FRAMES_REQUESTED" ||
+    message?.name === "CAPTURE_AUDIO_CHUNK_REQUESTED" ||
     message?.name === "DESCRIPTIONS_ATTACH_REQUESTED" ||
     message?.name === "DESCRIPTIONS_STOP_REQUESTED" ||
     message?.name === "DESCRIBE_NOW_REQUESTED" ||

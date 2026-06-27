@@ -100,9 +100,16 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = Path(os.getenv("DJANGO_STATIC_ROOT", str(BASE_DIR / "staticfiles")))
+ALIBABA_OSS_ACCESS_KEY_ID = os.getenv("ALIBABA_OSS_ACCESS_KEY_ID", "")
+ALIBABA_OSS_ACCESS_KEY_SECRET = os.getenv("ALIBABA_OSS_ACCESS_KEY_SECRET", "")
+ALIBABA_OSS_ENDPOINT = os.getenv("ALIBABA_OSS_ENDPOINT", "")
+ALIBABA_OSS_BUCKET = os.getenv("ALIBABA_OSS_BUCKET", "")
+ALIBABA_OSS_PREFIX = os.getenv("ALIBABA_OSS_PREFIX", "describeops")
+ALIBABA_OSS_PUBLIC_BASE_URL = os.getenv("ALIBABA_OSS_PUBLIC_BASE_URL", "")
+ALIBABA_OSS_SIGNED_URL_TTL_SECONDS = int(os.getenv("ALIBABA_OSS_SIGNED_URL_TTL_SECONDS", "3600"))
 STORAGES = {
     "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "BACKEND": "reader.storage_backends.AlibabaOSSStorage" if ALIBABA_OSS_BUCKET else "django.core.files.storage.FileSystemStorage",
     },
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
@@ -132,6 +139,7 @@ DESCRIBEOPS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 DESCRIBEOPS_MAX_UPLOAD_BYTES = int(os.getenv("DESCRIBEOPS_MAX_UPLOAD_BYTES", "26214400"))
+DESCRIBEOPS_MAX_AUDIO_UPLOAD_BYTES = int(os.getenv("DESCRIBEOPS_MAX_AUDIO_UPLOAD_BYTES", "52428800"))
 DESCRIBEOPS_MAX_VIDEO_UPLOAD_BYTES = int(os.getenv("DESCRIBEOPS_MAX_VIDEO_UPLOAD_BYTES", "524288000"))
 DESCRIBEOPS_MAX_FRAMES_PER_CHUNK = int(os.getenv("DESCRIBEOPS_MAX_FRAMES_PER_CHUNK", "8"))
 DESCRIBEOPS_YTDLP_COOKIE_FILE = os.getenv("DESCRIBEOPS_YTDLP_COOKIE_FILE", "")
@@ -146,6 +154,10 @@ QWEN_VISUAL_MODEL = os.getenv("QWEN_VISUAL_MODEL", "qwen3.6-flash")
 QWEN_TEXT_MODEL = os.getenv("QWEN_TEXT_MODEL", "qwen3.6-flash")
 QWEN_JUDGE_MODEL = os.getenv("QWEN_JUDGE_MODEL", os.getenv("QWEN_QA_MODEL", "qwen3.6-plus"))
 QWEN_FINAL_MODEL = os.getenv("QWEN_FINAL_MODEL", "qwen3.7-max")
+QWEN_AUDIO_TRANSCRIPTION_MODEL = os.getenv(
+    "QWEN_AUDIO_TRANSCRIPTION_MODEL",
+    os.getenv("DASHSCOPE_AUDIO_TRANSCRIPTION_MODEL", ""),
+)
 QWEN_VISUAL_FALLBACK_MODELS = [
     model.strip()
     for model in os.getenv("QWEN_VISUAL_FALLBACK_MODELS", "qwen3.6-plus,qwen3-vl-plus,qwen3-vl-flash").split(",")
@@ -171,6 +183,7 @@ QWEN_FINAL_MAX_TOKENS = int(os.getenv("QWEN_FINAL_MAX_TOKENS", "12000"))
 QWEN_TEMPERATURE = float(os.getenv("QWEN_TEMPERATURE", "0.1"))
 QWEN_TOP_P = float(os.getenv("QWEN_TOP_P", "0.7"))
 QWEN_ENABLE_FINAL_REPORT_AGENT = os.getenv("QWEN_ENABLE_FINAL_REPORT_AGENT", "1") == "1"
+QWEN_ENABLE_AUDIO_TRANSCRIPTION = os.getenv("QWEN_ENABLE_AUDIO_TRANSCRIPTION", "1") == "1"
 ALIBABA_CLOUD_DEPLOYMENT = os.getenv("ALIBABA_CLOUD_DEPLOYMENT", "local")
 
 LOGGING = {

@@ -8,6 +8,7 @@ dependencies = [
     "django-ninja>=1.4,<2",
     "gunicorn>=23.0,<24",
     "openai>=2.0,<3",
+    "oss2>=2.19,<3",
     "pillow>=11.0,<12",
     "psycopg[binary]>=3.2,<4",
     "python-dotenv>=1.0,<2",

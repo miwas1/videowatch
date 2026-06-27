@@ -15,6 +15,7 @@ from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.models import AbstractBaseUser
 from django.db import transaction
 from django.db.models import Count, Q
+from django.core.files.storage import default_storage
 from django.http import FileResponse, HttpRequest, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -22,7 +23,7 @@ from ninja import File, Form, NinjaAPI, Status
 from ninja.files import UploadedFile
 from ninja.security import APIKeyHeader
 
-from reader.models import FrameAsset, GeneratedArtifact, ProcessingJob, ReadingBlock, TimelineMoment, UserApiToken, UserCorrection, VideoChunk, VideoSession
+from reader.models import CanonicalVideo, FrameAsset, GeneratedArtifact, ProcessingJob, ReadingBlock, StoredAsset, TimelineMoment, UserApiToken, UserCorrection, VideoChunk, VideoSession
 from reader.schemas import (
     AuthRequest,
     AuthResponse,
@@ -46,12 +47,13 @@ from reader.schemas import (
     UrlProcessRequest,
 )
 from reader.services.agents import AgentSocietyRunner
+from reader.services.audio import enrich_chunk_with_audio_transcripts
 from reader.services.artifact_builder import build_artifact_from_session, normalize_workflow_targets
 from reader.services.events import emit_event
 from reader.services.export import export_reading_document_markdown
 from reader.services.jobs import JobCanceled, cancel_session_jobs, enqueue_job
-from reader.services.qwen import QwenConfigurationError, QwenResponseError
-from reader.services.storage import FrameValidationError, save_uploaded_frame
+from reader.services.qwen import QwenConfigurationError, QwenResponseError, stable_hash
+from reader.services.storage import FrameValidationError, save_uploaded_audio_chunk, save_uploaded_frame
 from reader.services.media_ingest import (
     ALLOWED_VIDEO_UPLOAD_EXTENSIONS,
     YouTubeAccessError,
@@ -142,6 +144,59 @@ def scope_sessions(request: HttpRequest):
     return queryset.filter(owner=user) if user else queryset
 
 
+def video_fingerprint(*, source_url: str = "", title: str = "", duration_seconds: float | None = None, file_checksum: str = "") -> str:
+    return stable_hash(
+        {
+            "source_url": source_url.strip().lower(),
+            "title": title.strip().lower(),
+            "duration_seconds": round(float(duration_seconds), 2) if duration_seconds is not None else None,
+            "file_checksum": file_checksum,
+        }
+    )
+
+
+def get_or_create_canonical_video(
+    *,
+    source_url: str = "",
+    title: str = "",
+    duration_seconds: float | None = None,
+    file_checksum: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> CanonicalVideo:
+    fingerprint = video_fingerprint(
+        source_url=source_url,
+        title=title,
+        duration_seconds=duration_seconds,
+        file_checksum=file_checksum,
+    )
+    canonical, created = CanonicalVideo.objects.get_or_create(
+        fingerprint=fingerprint,
+        defaults={
+            "canonical_url": source_url,
+            "title": title,
+            "duration_seconds": duration_seconds,
+            "metadata": metadata or {},
+        },
+    )
+    if not created:
+        changed = False
+        if title and not canonical.title:
+            canonical.title = title
+            changed = True
+        if source_url and not canonical.canonical_url:
+            canonical.canonical_url = source_url
+            changed = True
+        if duration_seconds and not canonical.duration_seconds:
+            canonical.duration_seconds = duration_seconds
+            changed = True
+        if metadata:
+            canonical.metadata = {**canonical.metadata, **metadata}
+            changed = True
+        if changed:
+            canonical.save(update_fields=["title", "canonical_url", "duration_seconds", "metadata", "updated_at"])
+    return canonical
+
+
 def get_session_for_request(request: HttpRequest, session_id: UUID) -> VideoSession:
     return get_object_or_404(scope_sessions(request), id=session_id)
 
@@ -188,7 +243,16 @@ def process_local_video_session(
     work_dir: Path,
 ) -> None:
     duration = float(metadata.get("duration_seconds") or probe_duration(video_path))
+    canonical = get_or_create_canonical_video(
+        source_url=str(metadata.get("webpage_url") or session.source_url),
+        title=str(metadata.get("title") or session.title),
+        duration_seconds=duration,
+        file_checksum=str(metadata.get("file_checksum") or ""),
+        metadata=metadata,
+    )
     expected_chunks = max(1, math.ceil(duration / chunk_seconds))
+    session.canonical_video = canonical
+    session.source_fingerprint = canonical.fingerprint
     session.title = metadata.get("title") or session.title
     session.page_title = session.title
     session.duration_seconds = duration
@@ -198,6 +262,8 @@ def process_local_video_session(
         update_fields=[
             "title",
             "page_title",
+            "canonical_video",
+            "source_fingerprint",
             "duration_seconds",
             "expected_chunk_count",
             "pipeline_stage",
@@ -303,6 +369,72 @@ def synthesize_artifacts(session: VideoSession, workflow_targets: list[str]) -> 
     session.synthesis_error = ""
     session.save(update_fields=["status", "pipeline_stage", "error_message", "synthesis_error", "updated_at"])
     emit_event(session, "session.ready", {"session_id": str(session.id)})
+
+
+def reuse_canonical_artifacts_if_ready(session: VideoSession) -> bool:
+    if not session.canonical_video_id:
+        return False
+    source_session = (
+        session.canonical_video.sessions.exclude(id=session.id)
+        .filter(status=VideoSession.Status.READY, artifacts__isnull=False)
+        .order_by("-updated_at")
+        .first()
+    )
+    if source_session is None:
+        return False
+
+    artifact_map: dict[str, GeneratedArtifact] = {}
+    with transaction.atomic():
+        for source_artifact in source_session.artifacts.all():
+            artifact, _created = GeneratedArtifact.objects.update_or_create(
+                session=session,
+                workflow_template=source_artifact.workflow_template,
+                defaults={
+                    "artifact_type": source_artifact.artifact_type,
+                    "title": source_artifact.title,
+                    "summary": source_artifact.summary,
+                    "markdown": source_artifact.markdown,
+                    "payload": {
+                        **(source_artifact.payload or {}),
+                        "reused_from_session_id": str(source_session.id),
+                    },
+                },
+            )
+            artifact_map[source_artifact.workflow_template] = artifact
+
+        reusable_assets = source_session.stored_assets.filter(
+            asset_type__in=[StoredAsset.AssetType.FINAL_ARTIFACT, StoredAsset.AssetType.EVIDENCE_MANIFEST]
+        ).select_related("artifact")
+        for source_asset in reusable_assets:
+            target_artifact = None
+            if source_asset.artifact_id and source_asset.artifact:
+                target_artifact = artifact_map.get(source_asset.artifact.workflow_template)
+            StoredAsset.objects.create(
+                canonical_video=session.canonical_video,
+                session=session,
+                artifact=target_artifact,
+                asset_type=source_asset.asset_type,
+                object_key=source_asset.object_key,
+                storage_backend=source_asset.storage_backend,
+                content_type=source_asset.content_type,
+                checksum=source_asset.checksum,
+                byte_size=source_asset.byte_size,
+                metadata={
+                    **(source_asset.metadata or {}),
+                    "reused_from_session_id": str(source_session.id),
+                    "reused_from_asset_id": str(source_asset.id),
+                },
+            )
+
+        session.status = VideoSession.Status.READY
+        session.pipeline_stage = VideoSession.PipelineStage.READY
+        session.error_message = ""
+        session.synthesis_error = ""
+        session.save(update_fields=["status", "pipeline_stage", "error_message", "synthesis_error", "updated_at"])
+
+    emit_event(session, "cache.hit", {"session_id": str(session.id), "source_session_id": str(source_session.id)})
+    emit_event(session, "session.ready", {"session_id": str(session.id), "cache_hit": True})
+    return True
 
 
 def block_schema(block: ReadingBlock) -> ReadingBlockResponse:
@@ -447,8 +579,17 @@ def logout(request: HttpRequest) -> dict[str, str]:
 
 @api.post("/api/v1/sessions", response={201: SessionResponse})
 def create_session(request: HttpRequest, payload: SessionCreateRequest) -> Status:
+    title = payload.title or payload.page_title
+    canonical = get_or_create_canonical_video(
+        source_url=payload.source_url,
+        title=title,
+        duration_seconds=payload.duration_seconds,
+        metadata={"source_type": "browser_extension", **(payload.settings or {})},
+    )
     session = VideoSession.objects.create(
         owner=current_user(request),
+        canonical_video=canonical,
+        source_fingerprint=canonical.fingerprint,
         source_url=payload.source_url,
         title=payload.title,
         page_title=payload.page_title,
@@ -456,6 +597,7 @@ def create_session(request: HttpRequest, payload: SessionCreateRequest) -> Statu
         settings=payload.settings,
     )
     emit_event(session, "session.created", {"session_id": str(session.id)})
+    reuse_canonical_artifacts_if_ready(session)
     return Status(201, session_schema(session))
 
 
@@ -595,6 +737,10 @@ def retry_session(request: HttpRequest, session_id: UUID) -> Status:
 @api.delete("/api/v1/sessions/{session_id}", response={200: dict})
 def delete_session(request: HttpRequest, session_id: UUID) -> dict[str, str]:
     session = get_session_for_request(request, session_id)
+    stored_assets = list(StoredAsset.objects.filter(session=session).values_list("object_key", flat=True))
+    for object_key in stored_assets:
+        if not StoredAsset.objects.exclude(session=session).filter(object_key=object_key).exists():
+            default_storage.delete(object_key)
     frames = FrameAsset.objects.filter(chunk__session=session).only("file")
     for frame in frames.iterator(chunk_size=200):
         frame.file.delete(save=False)
@@ -740,6 +886,7 @@ def upload_chunk(
     capture_notes: str = Form(""),
     process_now: bool = Form(True),
     frames: list[UploadedFile] = File(...),
+    audio_chunks: list[UploadedFile] = File([]),
 ) -> Status:
     session = get_session_for_request(request, session_id)
     if end_seconds <= start_seconds:
@@ -766,6 +913,8 @@ def upload_chunk(
         try:
             for frame in frames:
                 save_uploaded_frame(chunk, frame)
+            for audio_chunk in audio_chunks or []:
+                save_uploaded_audio_chunk(chunk, audio_chunk)
         except FrameValidationError as exc:
             transaction.set_rollback(True)
             return Status(400, ErrorResponse(detail=str(exc)))
@@ -776,6 +925,7 @@ def upload_chunk(
 
     if process_now:
         try:
+            enrich_chunk_with_audio_transcripts(chunk)
             AgentSocietyRunner().process_chunk(chunk)
             mark_session_ready_when_current_chunks_ready(session)
         except (QwenConfigurationError, QwenResponseError) as exc:
@@ -840,6 +990,7 @@ def upload_chunk_async(
     transcript_text: str = Form(""),
     capture_notes: str = Form(""),
     frames: list[UploadedFile] = File(...),
+    audio_chunks: list[UploadedFile] = File([]),
 ) -> Status:
     session = get_session_for_request(request, session_id)
     if end_seconds <= start_seconds:
@@ -866,6 +1017,8 @@ def upload_chunk_async(
         try:
             for frame in frames:
                 save_uploaded_frame(chunk, frame)
+            for audio_chunk in audio_chunks or []:
+                save_uploaded_audio_chunk(chunk, audio_chunk)
         except FrameValidationError as exc:
             transaction.set_rollback(True)
             return Status(400, ErrorResponse(detail=str(exc)))
@@ -938,8 +1091,14 @@ def create_session_from_url(request: HttpRequest, payload: UrlProcessRequest) ->
     except ValueError as exc:
         return Status(400, ErrorResponse(detail=str(exc)))
 
+    canonical = get_or_create_canonical_video(
+        source_url=payload.url,
+        metadata={"source_type": "url_ingest"},
+    )
     session = VideoSession.objects.create(
         owner=current_user(request),
+        canonical_video=canonical,
+        source_fingerprint=canonical.fingerprint,
         source_url=payload.url,
         status=VideoSession.Status.PROCESSING,
         pipeline_stage=VideoSession.PipelineStage.DOWNLOADING,
@@ -954,6 +1113,8 @@ def create_session_from_url(request: HttpRequest, payload: UrlProcessRequest) ->
         },
     )
     emit_event(session, "session.created", {"session_id": str(session.id)})
+    if reuse_canonical_artifacts_if_ready(session):
+        return Status(202, {"session_id": str(session.id), "status": "ready", "message": "Stored analysis reused."})
 
     enqueue_job(
         session=session,
@@ -1024,8 +1185,10 @@ def create_session_from_file(
     work_dir = Path(settings.MEDIA_ROOT) / "pending_uploads" / str(session.id)
     work_dir.mkdir(parents=True, exist_ok=True)
     video_path = work_dir / f"source{suffix}"
+    upload_hasher = hashlib.sha256()
     with video_path.open("wb") as target:
         for chunk in video.chunks():
+            upload_hasher.update(chunk)
             target.write(chunk)
     if video_path.stat().st_size > settings.DESCRIBEOPS_MAX_VIDEO_UPLOAD_BYTES:
         video_path.unlink(missing_ok=True)
@@ -1035,6 +1198,23 @@ def create_session_from_file(
             pass
         session.delete()
         return Status(400, ErrorResponse(detail="Uploaded video exceeds the configured size limit."))
+    file_checksum = upload_hasher.hexdigest()
+    canonical = get_or_create_canonical_video(
+        source_url=f"upload://{filename}",
+        title=Path(filename).stem,
+        file_checksum=file_checksum,
+        metadata={"source_type": "upload", "filename": filename},
+    )
+    session.canonical_video = canonical
+    session.source_fingerprint = canonical.fingerprint
+    session.save(update_fields=["canonical_video", "source_fingerprint", "updated_at"])
+    if reuse_canonical_artifacts_if_ready(session):
+        try:
+            video_path.unlink(missing_ok=True)
+            work_dir.rmdir()
+        except OSError:
+            pass
+        return Status(202, {"session_id": str(session.id), "status": "ready", "message": "Stored analysis reused."})
 
     enqueue_job(
         session=session,
@@ -1042,6 +1222,7 @@ def create_session_from_file(
         payload={
             "video_path": str(video_path),
             "title": Path(filename).stem,
+            "file_checksum": file_checksum,
             "chunk_seconds": chunk_seconds,
             "frame_count": frame_count,
             "frame_width": frame_width,
