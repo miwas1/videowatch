@@ -14,6 +14,7 @@ from django.conf import settings
 from openai import OpenAI
 
 from reader.models import FrameAsset
+from reader.services.archive import open_frame_file
 
 
 class QwenConfigurationError(RuntimeError):
@@ -238,8 +239,12 @@ class QwenClient:
         frame_id = str(frame.id)
         if frame_id in self._frame_cache:
             return self._frame_cache[frame_id]
-        path = Path(frame.file.path)
-        encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
+        if hasattr(frame.file, "open"):
+            with open_frame_file(frame) as stored_file:
+                data = stored_file.read()
+        else:
+            data = Path(frame.file.path).read_bytes()
+        encoded = base64.b64encode(data).decode("utf-8")
         data_url = f"data:{frame.mime_type};base64,{encoded}"
         self._frame_cache[frame_id] = data_url
         return data_url

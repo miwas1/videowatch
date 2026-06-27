@@ -12,6 +12,7 @@ from django.conf import settings
 
 from reader.models import AgentRun, ReadingBlock, VideoSession
 from reader.services.events import emit_event
+from reader.services.archive import open_frame_file
 from reader.services.qwen import QwenClient, QwenConfigurationError, QwenResponseError, QwenResult, stable_hash
 from reader.services.timecode import format_timestamp
 
@@ -402,7 +403,8 @@ def export_session_artifacts(
     for chunk in session.chunks.order_by("chunk_index"):
         for index, frame in enumerate(chunk.frames.all(), start=1):
             target = screenshots_dir / f"chunk-{chunk.chunk_index:03d}-{format_timestamp(chunk.start_seconds).replace(':', '-')}-frame-{index:02d}.jpg"
-            shutil.copy2(frame.file.path, target)
+            with open_frame_file(frame) as source, target.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
             screenshot_paths.append(target)
 
     code_manifest = []
