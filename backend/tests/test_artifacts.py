@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from reader.models import AgentRun, ReadingBlock, TimelineMoment, VideoChunk, VideoSession
+from reader.services.archive import open_frame_file
 from reader.services.artifacts import FinalReportAgent, export_session_artifacts
+from reader.services.storage import save_uploaded_frame
 from reader.services.qwen import QwenResult
 
 
@@ -30,6 +34,17 @@ class DeterministicFinalQwen:
             "confidence": 0.93,
         }
         return QwenResult(kwargs["model"], payload, "{}", 31, "final-req-1")
+
+
+class UploadedImage:
+    name = "frame.png"
+    content_type = "image/png"
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def read(self) -> bytes:
+        return self._data
 
 
 @pytest.mark.django_db
@@ -79,3 +94,17 @@ def test_export_session_artifacts_writes_final_report_from_final_agent(tmp_path,
     final_run = AgentRun.objects.get(chunk=chunk, role="final_report")
     assert final_run.model == "qwen3.7-max"
     assert final_run.confidence == 0.93
+
+
+@pytest.mark.django_db
+def test_open_frame_file_reads_frame_from_storage(tmp_path, settings) -> None:
+    settings.MEDIA_ROOT = tmp_path
+    session = VideoSession.objects.create(title="Frame archive")
+    chunk = VideoChunk.objects.create(session=session, chunk_index=0, start_seconds=0, end_seconds=5)
+    image_data = BytesIO()
+    Image.new("RGB", (1, 1), "white").save(image_data, format="PNG")
+    png_data = image_data.getvalue()
+    frame = save_uploaded_frame(chunk, UploadedImage(png_data))
+
+    with open_frame_file(frame) as stored_file:
+        assert stored_file.read() == png_data
